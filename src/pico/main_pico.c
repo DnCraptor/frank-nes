@@ -20,9 +20,13 @@
 #include "hardware/structs/xip_ctrl.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "board_config.h"
 #include "quicknes.h"
+#include "psram_init.h"
+#include "ff.h"
 
 /* 16KB stack in main SRAM — scratch_y (4KB) is too small for QuickNES */
 static uint8_t big_stack[16384] __attribute__((aligned(8)));
@@ -228,6 +232,132 @@ static void error_loop(const char *msg)
     while (1) { sleep_ms(16); }
 }
 
+/* Try to initialize PSRAM, returns true on success */
+static bool psram_available = false;
+#define PSRAM_BASE ((volatile uint8_t *)0x11000000)
+
+static bool try_init_psram(void)
+{
+    /* Try RP2350B pin first, then RP2350A */
+    static const uint cs_pins[] = { PSRAM_CS_PIN_RP2350B, PSRAM_CS_PIN_RP2350A };
+    for (int i = 0; i < 2; i++) {
+        psram_init(cs_pins[i]);
+        /* Write/read test */
+        PSRAM_BASE[0] = 0xA5;
+        PSRAM_BASE[1] = 0x5A;
+        __compiler_memory_barrier();
+        if (PSRAM_BASE[0] == 0xA5 && PSRAM_BASE[1] == 0x5A) {
+            printf("PSRAM detected on CS pin %u\n", cs_pins[i]);
+            psram_available = true;
+            return true;
+        }
+    }
+    printf("No PSRAM detected\n");
+    return false;
+}
+
+/* Load first .nes ROM from SD card "nes" directory.
+ * Returns ROM data pointer and sets *out_size. NULL on failure.
+ * If PSRAM is available, ROM is loaded there; otherwise uses malloc.
+ * Caller may free the buffer after qnes_load_rom() since QuickNES copies it. */
+static uint8_t *sd_rom_buf = NULL;
+
+static uint8_t *try_load_rom_from_sd(long *out_size)
+{
+    *out_size = 0;
+
+    FATFS fs;
+    FRESULT fr = f_mount(&fs, "", 1);
+    if (fr != FR_OK) {
+        printf("SD mount failed (%d)\n", fr);
+        return NULL;
+    }
+    printf("SD card mounted\n");
+
+    DIR dir;
+    fr = f_opendir(&dir, "/nes");
+    if (fr != FR_OK) {
+        printf("SD: /nes directory not found (%d)\n", fr);
+        f_unmount("");
+        return NULL;
+    }
+
+    /* Find first .nes file */
+    char filepath[280];
+    FILINFO fno;
+    bool found = false;
+    while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != '\0') {
+        if (fno.fattrib & AM_DIR)
+            continue;
+        size_t len = strlen(fno.fname);
+        if (len >= 4 &&
+            (fno.fname[len-4] == '.') &&
+            (fno.fname[len-3] == 'n' || fno.fname[len-3] == 'N') &&
+            (fno.fname[len-2] == 'e' || fno.fname[len-2] == 'E') &&
+            (fno.fname[len-1] == 's' || fno.fname[len-1] == 'S')) {
+            snprintf(filepath, sizeof(filepath), "/nes/%s", fno.fname);
+            found = true;
+            printf("SD: found ROM: %s (%lu bytes)\n", filepath, (unsigned long)fno.fsize);
+            break;
+        }
+    }
+    f_closedir(&dir);
+
+    if (!found) {
+        printf("SD: no .nes files in /nes\n");
+        f_unmount("");
+        return NULL;
+    }
+
+    FIL fil;
+    fr = f_open(&fil, filepath, FA_READ);
+    if (fr != FR_OK) {
+        printf("SD: failed to open %s (%d)\n", filepath, fr);
+        f_unmount("");
+        return NULL;
+    }
+
+    FSIZE_t fsize = f_size(&fil);
+    if (fsize < 16 || fsize > 2 * 1024 * 1024) {
+        printf("SD: invalid ROM size %lu\n", (unsigned long)fsize);
+        f_close(&fil);
+        f_unmount("");
+        return NULL;
+    }
+
+    /* Allocate buffer: prefer PSRAM, fall back to SRAM malloc */
+    if (psram_available) {
+        sd_rom_buf = (uint8_t *)PSRAM_BASE;
+        printf("SD: loading ROM into PSRAM\n");
+    } else {
+        sd_rom_buf = (uint8_t *)malloc(fsize);
+        if (!sd_rom_buf) {
+            printf("SD: malloc failed for %lu bytes\n", (unsigned long)fsize);
+            f_close(&fil);
+            f_unmount("");
+            return NULL;
+        }
+        printf("SD: loading ROM into SRAM\n");
+    }
+
+    UINT bytes_read;
+    fr = f_read(&fil, sd_rom_buf, (UINT)fsize, &bytes_read);
+    f_close(&fil);
+    f_unmount("");
+
+    if (fr != FR_OK || bytes_read != (UINT)fsize) {
+        printf("SD: read error (%d, got %u/%lu)\n", fr, bytes_read, (unsigned long)fsize);
+        if (!psram_available)
+            free(sd_rom_buf);
+        sd_rom_buf = NULL;
+        return NULL;
+    }
+
+    printf("SD: loaded %lu bytes\n", (unsigned long)fsize);
+    *out_size = (long)fsize;
+    return sd_rom_buf;
+}
+
 /* Stack watermark: paint stack with 0xDEADBEEF, later check how much was used */
 static void paint_stack(void)
 {
@@ -349,6 +479,9 @@ static void real_main(void)
     printf("\n=== murmnes (QuickNES) ===\n");
     printf("sys_clk: %lu Hz\n", (unsigned long)clock_get_hz(clk_sys));
 
+    /* Init PSRAM early — operator new/realloc redirect to PSRAM */
+    try_init_psram();
+
     printf("qnes_init...\n");
     if (qnes_init(SAMPLE_RATE) != 0) {
         printf("qnes_init FAILED\n");
@@ -356,14 +489,38 @@ static void real_main(void)
     }
     printf("qnes_init OK\n");
 
-#ifdef HAS_NES_ROM
-    long rom_size = (long)(nes_rom_end - nes_rom_data);
-    printf("qnes_load_rom (%ld bytes)...\n", rom_size);
-    if (qnes_load_rom(nes_rom_data, rom_size) != 0) {
-        printf("qnes_load_rom FAILED\n");
-        while (1) sleep_ms(100);
+    /* Try loading ROM: SD card first, then flash fallback */
+    bool rom_loaded = false;
+
+    {
+        long sd_rom_size = 0;
+        uint8_t *sd_rom = try_load_rom_from_sd(&sd_rom_size);
+        if (sd_rom) {
+            printf("qnes_load_rom from SD (%ld bytes)...\n", sd_rom_size);
+            if (qnes_load_rom(sd_rom, sd_rom_size) == 0) {
+                printf("SD ROM loaded OK\n");
+                rom_loaded = true;
+            } else {
+                printf("qnes_load_rom (SD) FAILED\n");
+            }
+            /* QuickNES copies ROM data, so free the buffer */
+            if (!psram_available && sd_rom_buf)
+                free(sd_rom_buf);
+            sd_rom_buf = NULL;
+        }
     }
-    printf("ROM loaded OK\n");
+
+#ifdef HAS_NES_ROM
+    if (!rom_loaded) {
+        long rom_size = (long)(nes_rom_end - nes_rom_data);
+        printf("qnes_load_rom from flash (%ld bytes)...\n", rom_size);
+        if (qnes_load_rom(nes_rom_data, rom_size) == 0) {
+            printf("Flash ROM loaded OK\n");
+            rom_loaded = true;
+        } else {
+            printf("qnes_load_rom (flash) FAILED\n");
+        }
+    }
 #endif
 
     /* Start HDMI directly — all flash-heavy init is done */
@@ -389,35 +546,35 @@ static void real_main(void)
     sleep_ms(100);
     printf("HDMI active\n");
 
-#ifdef HAS_NES_ROM
+    if (rom_loaded) {
+        uint32_t frame_count = 0;
+        while (1) {
+            for (int wait = 0; !vsync_flag && wait < 20000; wait++)
+                __wfe();
+            vsync_flag = 0;
 
-    uint32_t frame_count = 0;
-    while (1) {
-        for (int wait = 0; !vsync_flag && wait < 20000; wait++)
-            __wfe();
-        vsync_flag = 0;
+            int joypad = (frame_count >= 60 && frame_count < 63) ? 0x08 : 0;
+            qnes_emulate_frame(joypad, 0);
 
-        int joypad = (frame_count >= 60 && frame_count < 63) ? 0x08 : 0;
-        qnes_emulate_frame(joypad, 0);
+            /* Push NES audio into DI queue. No padding — produce only what
+             * the NES generates. Carry handles 4-sample boundary. Tiny rate
+             * deficit (~1.5 samples/frame) handled by ISR silence fallback. */
+            int16_t tmp[1024];
+            long n = qnes_read_samples(tmp, 1024);
 
-        /* Push NES audio into DI queue. No padding — produce only what
-         * the NES generates. Carry handles 4-sample boundary. Tiny rate
-         * deficit (~1.5 samples/frame) handled by ISR silence fallback. */
-        int16_t tmp[1024];
-        long n = qnes_read_samples(tmp, 1024);
-        
-        if (n > 0) {
-            audio_push_samples(tmp, (int)n);
+            if (n > 0) {
+                audio_push_samples(tmp, (int)n);
+            }
+
+            update_palette();
+            frame_pitch = 272;
+            frame_pixels = qnes_get_pixels();
+
+            frame_count++;
         }
-
-        update_palette();
-        frame_pitch = 272;
-        frame_pixels = qnes_get_pixels();
-
-        frame_count++;
+    } else {
+        printf("No ROM loaded (no SD card ROM, no flash ROM).\n");
+        generate_test_pattern();
+        while (1) { sleep_ms(100); }
     }
-#else
-    printf("No ROM embedded.\n");
-    while (1) { sleep_ms(100); }
-#endif
 }

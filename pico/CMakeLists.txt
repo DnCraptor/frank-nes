@@ -84,6 +84,10 @@ target_compile_definitions(murmnes PRIVATE
     PICO_STACK_SIZE=0x1000
     NDEBUG
     NO_UNALIGNED_ACCESS
+    SDCARD_PIN_SPI0_SCK=6
+    SDCARD_PIN_SPI0_MOSI=7
+    SDCARD_PIN_SPI0_MISO=4
+    SDCARD_PIN_SPI0_CS=5
 )
 
 # C++ flags: no exceptions, no RTTI (saves flash/RAM)
