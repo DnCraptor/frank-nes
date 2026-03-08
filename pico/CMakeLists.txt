@@ -20,36 +20,14 @@ set(QNESDIR ${PROJECT_ROOT}/nes_emu)
 add_compile_definitions(MODE_HSTX_CLK_DIV=2)
 add_subdirectory(${DRIVERSDIR}/pico_hdmi pico_hdmi)
 
-# Optional drivers (enable via -D flags)
-option(PSRAM_ENABLED "Enable PSRAM support" OFF)
-option(SDCARD_ENABLED "Enable SD card support" OFF)
-option(PS2KBD_ENABLED "Enable PS/2 keyboard support" OFF)
-option(USB_HID_ENABLED "Enable USB HID host support" OFF)
+# Peripheral drivers (always compiled)
+set(PSRAM_MAX_FREQ_MHZ 133 CACHE STRING "PSRAM clock frequency in MHz")
+add_compile_definitions(PSRAM_MAX_FREQ_MHZ=${PSRAM_MAX_FREQ_MHZ})
 
-# PSRAM driver
-if(PSRAM_ENABLED)
-    set(PSRAM_MAX_FREQ_MHZ 133 CACHE STRING "PSRAM clock frequency in MHz")
-    add_compile_definitions(PSRAM_ENABLED PSRAM_MAX_FREQ_MHZ=${PSRAM_MAX_FREQ_MHZ})
-endif()
-
-# SD card driver (needs fatfs)
-if(SDCARD_ENABLED)
-    add_subdirectory(${PROJECT_ROOT}/lib/fatfs fatfs)
-    add_subdirectory(${DRIVERSDIR}/sdcard sdcard)
-    add_compile_definitions(SDCARD_ENABLED)
-endif()
-
-# PS/2 keyboard driver
-if(PS2KBD_ENABLED)
-    add_subdirectory(${DRIVERSDIR}/ps2kbd ps2kbd)
-    add_compile_definitions(PS2KBD_ENABLED)
-endif()
-
-# USB HID driver
-if(USB_HID_ENABLED)
-    add_subdirectory(${DRIVERSDIR}/usbhid usbhid)
-    add_compile_definitions(USB_HID_ENABLED)
-endif()
+add_subdirectory(${PROJECT_ROOT}/lib/fatfs fatfs)
+add_subdirectory(${DRIVERSDIR}/sdcard sdcard)
+add_subdirectory(${DRIVERSDIR}/ps2kbd ps2kbd)
+add_subdirectory(${DRIVERSDIR}/usbhid usbhid)
 
 # QuickNES emulation core sources (excluding NTSC filter)
 set(QNES_SOURCES
@@ -84,18 +62,10 @@ set(QNES_SOURCES
     ${QNESDIR}/quicknes.cpp
 )
 
-set(MURMNES_SOURCES ${PICODIR}/main_pico.c)
-
-# Add PSRAM sources directly (no subdirectory — INTERFACE-style)
-if(PSRAM_ENABLED)
-    list(APPEND MURMNES_SOURCES
-        ${DRIVERSDIR}/psram_init.c
-        ${DRIVERSDIR}/psram_allocator.c
-    )
-endif()
-
 add_executable(murmnes
-    ${MURMNES_SOURCES}
+    ${PICODIR}/main_pico.c
+    ${DRIVERSDIR}/psram_init.c
+    ${DRIVERSDIR}/psram_allocator.c
     ${QNES_SOURCES}
 )
 
@@ -130,34 +100,19 @@ target_link_libraries(murmnes
     hardware_clocks
     hardware_dma
     hardware_irq
+    hardware_gpio
     pico_hdmi
+    sdcard
+    ps2kbd
+    usbhid
 )
 
-if(PSRAM_ENABLED)
-    target_link_libraries(murmnes hardware_gpio)
-endif()
-
-if(SDCARD_ENABLED)
-    target_link_libraries(murmnes sdcard)
-endif()
-
-if(PS2KBD_ENABLED)
-    target_link_libraries(murmnes ps2kbd)
-endif()
-
-if(USB_HID_ENABLED)
-    target_link_libraries(murmnes usbhid)
-    # USB HID uses host mode — disable stdio USB to avoid conflict
-    pico_enable_stdio_usb(murmnes 0)
-else()
-    pico_enable_stdio_usb(murmnes 1)
-endif()
-
+# USB HID uses host mode — disable stdio USB to avoid conflict
+pico_enable_stdio_usb(murmnes 0)
 pico_enable_stdio_uart(murmnes 0)
 
 # Optional: embed NES ROM into flash
 if(DEFINED NES_ROM_PATH)
-    # Copy ROM to a fixed name so objcopy generates predictable symbols
     set(ROM_COPY ${CMAKE_CURRENT_BINARY_DIR}/nes_rom.bin)
     set(ROM_OBJ ${CMAKE_CURRENT_BINARY_DIR}/nes_rom.o)
 
@@ -183,7 +138,6 @@ if(DEFINED NES_ROM_PATH)
     target_sources(murmnes PRIVATE ${ROM_OBJ})
     target_compile_definitions(murmnes PRIVATE HAS_NES_ROM)
 
-    # objcopy generates symbols: _binary_nes_rom_bin_{start,end,size}
     target_link_options(murmnes PRIVATE
         -Wl,--defsym=nes_rom_data=_binary_nes_rom_bin_start
         -Wl,--defsym=nes_rom_end=_binary_nes_rom_bin_end

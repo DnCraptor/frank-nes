@@ -266,8 +266,6 @@ uint8_t Ps2Kbd_Mrmltr::hidCodePage1(uint8_t ps2code) {
   }
 }
 
-#include "ff.h"
-
 void Ps2Kbd_Mrmltr::handleActions() {
   /*
   FIL f;

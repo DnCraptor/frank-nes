@@ -1,7 +1,7 @@
 // PS/2 Keyboard Wrapper for Genesis
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "../../src/board_config.h"
+#include "board_config.h"
 #include "ps2kbd_wrapper.h"
 #include "ps2kbd_mrmltr.h"
 

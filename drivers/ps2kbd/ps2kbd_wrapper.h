@@ -1,6 +1,8 @@
 #ifndef PS2KBD_WRAPPER_H
 #define PS2KBD_WRAPPER_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif

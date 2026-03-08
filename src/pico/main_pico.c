@@ -9,7 +9,6 @@
 
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
-#include "pico/stdio_usb.h"
 
 #include "hardware/clocks.h"
 
@@ -267,11 +266,6 @@ static void real_main(void)
     paint_stack();
     sleep_ms(500);
 
-    /* All QuickNES init BEFORE Core 1 — no flash contention, no mode switch */
-    for (int i = 0; i < 50; i++) {
-        if (stdio_usb_connected()) break;
-        sleep_ms(100);
-    }
     printf("\n=== murmnes (QuickNES) ===\n");
     printf("sys_clk: %lu Hz\n", (unsigned long)clock_get_hz(clk_sys));
 
