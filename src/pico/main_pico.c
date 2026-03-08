@@ -60,27 +60,43 @@ static int nes_audio_count = 0;
 static int nes_audio_pos = 0;
 static int audio_frame_counter = 0;
 
+/* Minimum queue level — below this, pad with silence to prevent
+ * the ISR from hitting 0 and using the broken-B-frame fallback. */
+#define AUDIO_QUEUE_MIN 100
+
+static bool push_audio_packet(const audio_sample_t *samples)
+{
+    hstx_packet_t packet;
+    int new_fc = hstx_packet_set_audio_samples(&packet, samples, 4, audio_frame_counter);
+    hstx_data_island_t island;
+    hstx_encode_data_island(&island, &packet, false, true);
+    if (!hstx_di_queue_push(&island))
+        return false;
+    audio_frame_counter = new_fc;
+    return true;
+}
+
 static void feed_audio(void)
 {
+    /* Push real NES audio samples */
     while (nes_audio_pos + 4 <= nes_audio_count) {
-        int saved_pos = nes_audio_pos;
-        int saved_fc = audio_frame_counter;
-
         audio_sample_t samples[4];
         for (int i = 0; i < 4; i++) {
-            int16_t s = nes_audio_buf[nes_audio_pos++];
+            int16_t s = nes_audio_buf[nes_audio_pos + i];
             samples[i].left = s;
             samples[i].right = s;
         }
-        hstx_packet_t packet;
-        audio_frame_counter = hstx_packet_set_audio_samples(&packet, samples, 4, audio_frame_counter);
-        hstx_data_island_t island;
-        hstx_encode_data_island(&island, &packet, false, true);
-        if (!hstx_di_queue_push(&island)) {
-            nes_audio_pos = saved_pos;
-            audio_frame_counter = saved_fc;
+        if (!push_audio_packet(samples))
             break;
-        }
+        nes_audio_pos += 4;
+    }
+
+    /* If queue is getting low and no more NES samples, pad with silence
+     * using proper frame counter to maintain valid B-frame sequence */
+    while (hstx_di_queue_get_level() < AUDIO_QUEUE_MIN) {
+        audio_sample_t silence[4] = {0};
+        if (!push_audio_packet(silence))
+            break;
     }
 }
 
