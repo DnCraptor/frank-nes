@@ -16,8 +16,8 @@ set(DRIVERSDIR ${PROJECT_ROOT}/drivers)
 set(PICODIR ${PROJECT_ROOT}/src/pico)
 set(QNESDIR ${PROJECT_ROOT}/nes_emu)
 
-# sys_clk=252MHz, HSTX needs 126MHz -> divider=2
-add_compile_definitions(MODE_HSTX_CLK_DIV=2)
+# HSTX clocked from PLL_USB at 126MHz (reconfigured in main)
+add_compile_definitions(MODE_HSTX_CLK_DIV=1)
 add_subdirectory(${DRIVERSDIR}/pico_hdmi pico_hdmi)
 
 # Peripheral drivers (always compiled)
@@ -105,6 +105,7 @@ target_link_libraries(murmnes
     hardware_dma
     hardware_irq
     hardware_gpio
+    hardware_pll
     pico_hdmi
     sdcard
     ps2kbd

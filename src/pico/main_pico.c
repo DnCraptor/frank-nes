@@ -14,6 +14,10 @@
 #endif
 
 #include "hardware/clocks.h"
+#include "hardware/pll.h"
+#include "hardware/vreg.h"
+#include "hardware/structs/qmi.h"
+#include "hardware/structs/xip_ctrl.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -54,76 +58,45 @@ static void __not_in_flash("vsync") vsync_cb(void)
     __sev(); /* wake Core 0 from WFE */
 }
 
-/* Lock-free SPSC ring buffer for raw audio samples between cores.
- * Core 0 pushes mono samples after each frame.
- * Core 1 pops, encodes to HDMI packets, pushes to DI queue.
- * Power-of-2 size for fast masking. ~46ms at 44100 Hz. */
-#define SAMPLE_RING_SIZE 2048
-#define SAMPLE_RING_MASK (SAMPLE_RING_SIZE - 1)
-static int16_t sample_ring[SAMPLE_RING_SIZE];
-static volatile uint32_t sample_ring_head = 0; /* Core 0 writes */
-static volatile uint32_t sample_ring_tail = 0; /* Core 1 reads */
+/*
+ * Audio pipeline — same architecture as pico-infonesPlus:
+ *   Core 0: encode NES audio → push pre-encoded packets to DI queue
+ *   Core 1 ISR: pop from DI queue → HDMI output
+ *   One shared queue. No intermediate buffers. No background task.
+ *
+ * All encoding functions are __not_in_flash (SRAM) so Core 0 can
+ * encode without flash contention after running QuickNES from flash.
+ * DI queue (512 entries = ~43ms) survives the ~10ms emulation gap.
+ */
 static int audio_frame_counter = 0;
 
-/* Core 0: push raw mono samples into ring buffer */
-static void audio_push_samples(const int16_t *buf, int count)
+/* Encode mono NES samples into HDMI audio packets and push to DI queue.
+ * Runs on Core 0. All called functions are in SRAM (__not_in_flash). */
+static void __not_in_flash("audio") audio_push_samples(const int16_t *buf, int count)
 {
-    uint32_t head = sample_ring_head;
-    for (int i = 0; i < count; i++) {
-        uint32_t next = (head + 1) & SAMPLE_RING_MASK;
-        if (next == sample_ring_tail)
-            break;
-        sample_ring[head] = buf[i];
-        head = next;
-    }
-    __dmb(); /* ensure sample writes are visible before head update */
-    sample_ring_head = head;
-}
-
-static bool __not_in_flash("audio") push_audio_packet(const audio_sample_t *samples)
-{
-    hstx_packet_t packet;
-    int new_fc = hstx_packet_set_audio_samples(&packet, samples, 4, audio_frame_counter);
-    hstx_data_island_t island;
-    hstx_encode_data_island(&island, &packet, false, true);
-    if (!hstx_di_queue_push(&island))
-        return false;
-    audio_frame_counter = new_fc;
-    return true;
-}
-
-/* Core 1 background task: pop samples from ring, encode, push to HDMI queue.
- * All code + data in SRAM — zero flash access. */
-static void __not_in_flash("audio") feed_audio(void)
-{
-    uint32_t tail = sample_ring_tail;
-    uint32_t head = sample_ring_head;
-    uint32_t avail = (head - tail) & SAMPLE_RING_MASK;
-
-    while (avail >= 4) {
+    int pos = 0;
+    while (pos + 4 <= count) {
         audio_sample_t samples[4];
         for (int i = 0; i < 4; i++) {
-            int16_t s = sample_ring[tail];
-            samples[i].left = s;
-            samples[i].right = s;
-            tail = (tail + 1) & SAMPLE_RING_MASK;
+            samples[i].left = buf[pos + i];
+            samples[i].right = buf[pos + i];
         }
-        if (!push_audio_packet(samples)) {
-            tail = (tail - 4) & SAMPLE_RING_MASK; /* rollback */
+        hstx_packet_t packet;
+        int new_fc = hstx_packet_set_audio_samples(&packet, samples, 4, audio_frame_counter);
+        hstx_data_island_t island;
+        hstx_encode_data_island(&island, &packet, false, true);
+        if (!hstx_di_queue_push(&island))
             break;
-        }
-        avail -= 4;
+        audio_frame_counter = new_fc;
+        pos += 4;
     }
-    __dmb(); /* ensure sample reads complete before tail update */
-    sample_ring_tail = tail;
-
-    /* Keep silence fallback packet's B-frame counter in sync */
     hstx_di_queue_update_silence(audio_frame_counter);
 }
 
-static void feed_silence(void)
+static void audio_fill_silence(int count)
 {
-    while (hstx_di_queue_get_level() < 400) {
+    int16_t silence[4] = {0};
+    for (int i = 0; i < count / 4; i++) {
         audio_sample_t samples[4] = {0};
         hstx_packet_t packet;
         audio_frame_counter = hstx_packet_set_audio_samples(&packet, samples, 4, audio_frame_counter);
@@ -204,7 +177,7 @@ static void error_loop(const char *msg)
 {
     printf("ERROR: %s\n", msg);
     generate_test_pattern();
-    while (1) { feed_audio(); sleep_ms(16); }
+    while (1) { sleep_ms(16); }
 }
 
 /* Stack watermark: paint stack with 0xDEADBEEF, later check how much was used */
@@ -277,9 +250,37 @@ int main(void)
     __builtin_unreachable();
 }
 
+/* Configure flash timing for overclocked CPU.
+ * Must run from SRAM — flash is being reconfigured. */
+static void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz, int flash_max_mhz)
+{
+    const int clock_hz = cpu_mhz * 1000000;
+    const int max_flash_freq = flash_max_mhz * 1000000;
+
+    int divisor = (clock_hz + max_flash_freq - (max_flash_freq >> 4) - 1) / max_flash_freq;
+    if (divisor == 1 && clock_hz >= 166000000)
+        divisor = 2;
+
+    int rxdelay = divisor;
+    if (clock_hz / divisor > 100000000 && clock_hz >= 166000000)
+        rxdelay += 1;
+
+    qmi_hw->m[0].timing = 0x60007000 |
+                           rxdelay << QMI_M0_TIMING_RXDELAY_LSB |
+                           divisor << QMI_M0_TIMING_CLKDIV_LSB;
+}
+
 static void real_main(void)
 {
-    set_sys_clock_khz(252000, true);
+    /* Overclock to 378 MHz — same pattern as murmgenesis */
+    vreg_disable_voltage_limit();
+    vreg_set_voltage(VREG_VOLTAGE_1_60);
+    sleep_ms(10);
+    set_flash_timings(378, 88);
+    sleep_ms(10);
+    if (!set_sys_clock_khz(378000, false))
+        set_sys_clock_khz(252000, true);
+
     stdio_init_all();
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
@@ -322,12 +323,20 @@ static void real_main(void)
     frame_pitch = NES_WIDTH;
 
     hstx_di_queue_init();
-    feed_silence();
+    audio_fill_silence(SAMPLE_RATE / 60 * 6); /* pre-fill ~100ms */
     video_output_set_vsync_callback(vsync_cb);
     video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
+
+    /* Override HSTX clock: PLL_USB reconfigured to 126 MHz.
+     * Independent of sys_clk — works at any CPU speed. */
+    pll_deinit(pll_usb);
+    pll_init(pll_usb, 1, 756000000, 6, 1); /* 12 × 63 / 6 = 126 MHz */
+    clock_configure(clk_hstx, 0,
+                    CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+                    126000000, 126000000);
+
     pico_hdmi_set_audio_sample_rate(SAMPLE_RATE);
     video_output_set_scanline_callback(scanline_callback);
-    video_output_set_background_task(feed_audio);
     multicore_launch_core1(video_output_core1_run);
     sleep_ms(100);
     printf("HDMI active\n");
@@ -343,18 +352,14 @@ static void real_main(void)
         int joypad = (frame_count >= 60 && frame_count < 63) ? 0x08 : 0;
         qnes_emulate_frame(joypad, 0);
 
-        /* Read NES audio and push into lock-free ring buffer for Core 1.
-         * Pad to exactly 735 samples (44100/60) to match ISR consumption. */
-        {
-            int16_t tmp[1024];
-            long n = qnes_read_samples(tmp, 1024);
-            /* Pad with silence to match ISR rate */
-            int target = SAMPLE_RATE / 60; /* 735 */
-            while (n < target && n < 1024)
-                tmp[n++] = 0;
-            if (n > 0)
-                audio_push_samples(tmp, (int)n);
-        }
+        /* Encode NES audio directly into DI queue on Core 0.
+         * Pad to 735 samples (44100/60) to match ISR consumption rate. */
+        int16_t tmp[1024];
+        long n = qnes_read_samples(tmp, 1024);
+        int target = SAMPLE_RATE / 60;
+        while (n < target && n < 1024)
+            tmp[n++] = 0;
+        audio_push_samples(tmp, (int)n);
 
         update_palette();
         frame_pitch = 272;
