@@ -88,6 +88,7 @@ target_link_libraries(murmnes
     hardware_clocks
     hardware_dma
     hardware_irq
+    hardware_timer
     pico_hdmi
 )
 
