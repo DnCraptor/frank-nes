@@ -22,6 +22,13 @@ if [ -n "$VIDEO_MODE" ]; then
     CMAKE_OPTS="$CMAKE_OPTS -DVIDEO_MODE=$VIDEO_MODE"
 fi
 
+# Optional drivers: PSRAM_ENABLED, SDCARD_ENABLED, PS2KBD_ENABLED, USB_HID_ENABLED
+for OPT in PSRAM_ENABLED SDCARD_ENABLED PS2KBD_ENABLED USB_HID_ENABLED; do
+    if [ "${!OPT}" = "ON" ] || [ "${!OPT}" = "1" ]; then
+        CMAKE_OPTS="$CMAKE_OPTS -D${OPT}=ON"
+    fi
+done
+
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
