@@ -32,6 +32,10 @@
 #include "ps2kbd_wrapper.h"
 #include "ff.h"
 
+#if USB_HID_ENABLED
+#include "usbhid.h"
+#endif
+
 /* 16KB stack in main SRAM — scratch_y (4KB) is too small for QuickNES */
 static uint8_t big_stack[16384] __attribute__((aligned(8)));
 static void real_main(void);
@@ -593,6 +597,14 @@ static void real_main(void)
     video_output_set_vsync_callback(vsync_cb);
     video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
 
+#if USB_HID_ENABLED
+    /* If USB HID is enabled, we MUST leave pll_usb at 48 MHz for TinyUSB.
+     * Derive clk_hstx from clk_sys instead.
+     * sys_clk is either 378 MHz or 252 MHz, we configure divider for 126 MHz. */
+    clock_configure(clk_hstx, 0,
+                    CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS,
+                    clock_get_hz(clk_sys), 126000000);
+#else
     /* Override HSTX clock: PLL_USB reconfigured to 126 MHz.
      * Independent of sys_clk — works at any CPU speed. */
     pll_deinit(pll_usb);
@@ -600,6 +612,7 @@ static void real_main(void)
     clock_configure(clk_hstx, 0,
                     CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
                     126000000, 126000000);
+#endif
 
     pico_hdmi_set_audio_sample_rate(SAMPLE_RATE);
     video_output_set_scanline_callback(scanline_callback);
@@ -614,20 +627,59 @@ static void real_main(void)
     ps2kbd_init();
     printf("PS/2 keyboard initialized (CLK=%d, DATA=%d)\n", PS2_PIN_CLK, PS2_PIN_DATA);
 
+#if USB_HID_ENABLED
+    usbhid_init();
+    printf("USB HID Host initialized\n");
+#endif
+
     if (rom_loaded) {
         while (1) {
             /* Wait for vsync. No double-buffer gate — frame pointer is
              * applied immediately after emulation for lowest input latency. */
-            for (int wait = 0; !vsync_flag && wait < 20000; wait++)
+            uint32_t wait_start = time_us_32();
+            while (!vsync_flag && (time_us_32() - wait_start) < 20000) {
+#if USB_HID_ENABLED
+                usbhid_task();
+#endif
                 __wfe();
+            }
             vsync_flag = 0;
 
             /* Fresh gamepad read right at vsync — input from NOW, not
              * from the previous frame. ~100µs cost is negligible. */
             nespad_read();
             ps2kbd_tick();
-            int joypad1 = nespad_to_qnes(nespad_state) | ps2kbd_to_qnes(ps2kbd_get_state());
+            
+            uint16_t kbd_state = ps2kbd_get_state();
+
+#if USB_HID_ENABLED
+            kbd_state |= usbhid_get_kbd_state();
+#endif
+
+            int joypad1 = nespad_to_qnes(nespad_state) | ps2kbd_to_qnes(kbd_state);
             int joypad2 = nespad_to_qnes(nespad_state2);
+
+#if USB_HID_ENABLED
+            if (usbhid_gamepad_connected()) {
+                usbhid_gamepad_state_t gp;
+                usbhid_get_gamepad_state(&gp);
+                
+                int usb_joy = 0;
+                if (gp.dpad & 0x01) usb_joy |= 0x10; // Up
+                if (gp.dpad & 0x02) usb_joy |= 0x20; // Down
+                if (gp.dpad & 0x04) usb_joy |= 0x40; // Left
+                if (gp.dpad & 0x08) usb_joy |= 0x80; // Right
+                
+                if (gp.buttons & 0x01) usb_joy |= 0x01; // A -> NES A
+                if (gp.buttons & 0x02) usb_joy |= 0x02; // B -> NES B
+                if (gp.buttons & 0x04) usb_joy |= 0x01; // C -> NES A
+                if (gp.buttons & 0x08) usb_joy |= 0x02; // X -> NES B
+                if (gp.buttons & 0x40) usb_joy |= 0x08; // Start -> NES Start
+                if (gp.buttons & 0x80) usb_joy |= 0x04; // Select -> NES Select
+                
+                joypad1 |= usb_joy;
+            }
+#endif
 
             qnes_emulate_frame(joypad1, joypad2);
 
