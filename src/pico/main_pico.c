@@ -47,8 +47,10 @@ extern const uint8_t nes_rom_data[];
 extern const uint8_t nes_rom_end[];
 #endif
 
-/* Palette lookup: NES indexed pixel -> RGB565 */
-static uint16_t rgb565_palette[256];
+/* Palette lookup: NES indexed pixel -> doubled RGB565 (two pixels per word).
+ * Pre-doubled eliminates shift+OR in the scanline callback hot loop,
+ * reducing SRAM accesses and keeping the DMA ISR within timing budget. */
+static uint32_t rgb565_palette_32[256];
 
 /* Pointer to current frame pixels — only updated during vblank by vsync_cb */
 static const uint8_t *frame_pixels;
@@ -187,7 +189,8 @@ static void update_palette(void)
         if (idx < 0 || idx >= 512)
             idx = 0x0F; /* black */
         const qnes_rgb_t *c = &colors[idx];
-        rgb565_palette[i] = ((c->r & 0xF8) << 8) | ((c->g & 0xFC) << 3) | (c->b >> 3);
+        uint16_t c16 = ((c->r & 0xF8) << 8) | ((c->g & 0xFC) << 3) | (c->b >> 3);
+        rgb565_palette_32[i] = c16 | ((uint32_t)c16 << 16);
     }
 }
 
@@ -202,19 +205,21 @@ void __not_in_flash("scanline") scanline_callback(
     uint32_t nes_line = active_line < 480 ? active_line / 2 : 0;
     const uint8_t *src = frame_pixels + nes_line * frame_pitch;
 
-    /* Left border: 64 pixels = 32 words of black (640 - 256*2 = 128, half = 64) */
-    for (int i = 0; i < 32; i++)
-        dst[i] = 0;
-
-    /* NES pixels: each pixel doubled horizontally = 512 pixels = 256 words */
-    for (int x = 0; x < NES_WIDTH; x++) {
-        uint16_t c = rgb565_palette[src[x]];
-        dst[32 + x] = c | (c << 16);
+    /* Borders (dst[0..31] and dst[288..319]) stay zero from BSS init —
+     * line_buffer is static and only this callback writes to it.
+     *
+     * NES pixels: read 4 bytes at a time, pre-doubled palette lookup.
+     * ~576 SRAM accesses vs ~960 original, fitting within the ~2400
+     * cycle DMA ISR budget even under Core 0 SRAM contention. */
+    uint32_t *out = dst + 32;
+    for (int x = 0; x < NES_WIDTH; x += 4) {
+        uint32_t p = *(const uint32_t *)(src + x);
+        out[0] = rgb565_palette_32[p & 0xFF];
+        out[1] = rgb565_palette_32[(p >> 8) & 0xFF];
+        out[2] = rgb565_palette_32[(p >> 16) & 0xFF];
+        out[3] = rgb565_palette_32[(p >> 24)];
+        out += 4;
     }
-
-    /* Right border */
-    for (int i = 288; i < 320; i++)
-        dst[i] = 0;
 }
 
 /* Generate test pattern when no ROM is loaded */
@@ -226,8 +231,10 @@ static void generate_test_pattern(void)
     static const uint16_t bars[] = {
         0xFFFF, 0xFFE0, 0x07FF, 0x07E0, 0xF81F, 0xF800, 0x001F, 0x0000
     };
-    for (int i = 0; i < 256; i++)
-        rgb565_palette[i] = bars[i % 8];
+    for (int i = 0; i < 256; i++) {
+        uint16_t c = bars[i % 8];
+        rgb565_palette_32[i] = c | ((uint32_t)c << 16);
+    }
 
     for (int y = 0; y < NES_HEIGHT; y++) {
         for (int x = 0; x < NES_WIDTH; x++) {
