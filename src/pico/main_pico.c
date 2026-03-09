@@ -586,9 +586,6 @@ static void real_main(void)
                  NESPAD_CLK_PIN, NESPAD_DATA_PIN, NESPAD_LATCH_PIN);
 
     if (rom_loaded) {
-        /* Trigger first gamepad read before entering loop */
-        nespad_read_start();
-
         while (1) {
             /* Wait for vsync. No double-buffer gate — frame pointer is
              * applied immediately after emulation for lowest input latency. */
@@ -596,12 +593,11 @@ static void real_main(void)
                 __wfe();
             vsync_flag = 0;
 
-            /* Collect gamepad result (PIO already done) and trigger next read
-             * immediately — it runs in parallel with emulation below. */
-            nespad_read_finish();
+            /* Fresh gamepad read right at vsync — input from NOW, not
+             * from the previous frame. ~100µs cost is negligible. */
+            nespad_read();
             int joypad1 = nespad_to_qnes(nespad_state);
             int joypad2 = nespad_to_qnes(nespad_state2);
-            nespad_read_start();
 
             qnes_emulate_frame(joypad1, joypad2);
 
