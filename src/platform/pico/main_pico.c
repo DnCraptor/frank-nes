@@ -599,10 +599,10 @@ static void real_main(void)
 
 #if USB_HID_ENABLED
     /* If USB HID is enabled, we MUST leave pll_usb at 48 MHz for TinyUSB.
-     * Derive clk_hstx from clk_sys instead.
-     * sys_clk is either 378 MHz or 252 MHz, we configure divider for 126 MHz. */
+     * Derive clk_hstx from pll_sys instead to avoid clk_sys mux jitter!
+     * pll_sys is either 378 MHz or 252 MHz, we configure divider for 126 MHz. */
     clock_configure(clk_hstx, 0,
-                    CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS,
+                    CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
                     clock_get_hz(clk_sys), 126000000);
 #else
     /* Override HSTX clock: PLL_USB reconfigured to 126 MHz.
@@ -638,13 +638,12 @@ static void real_main(void)
              * applied immediately after emulation for lowest input latency. */
             uint32_t wait_start = time_us_32();
             while (!vsync_flag && (time_us_32() - wait_start) < 20000) {
+#if USB_HID_ENABLED
+                usbhid_task();
+#endif
                 __wfe();
             }
             vsync_flag = 0;
-
-#if USB_HID_ENABLED
-            usbhid_task();
-#endif
 
             /* Fresh gamepad read right at vsync — input from NOW, not
              * from the previous frame. ~100µs cost is negligible. */
