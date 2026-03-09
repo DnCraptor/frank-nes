@@ -45,65 +45,36 @@ static bool queue_pop(uint8_t* pressed, uint8_t* key) {
     return true;
 }
 
-// Genesis key codes returned by hid_to_genesis()
-// These are translated to button presses in main.c
-#define GENESIS_KEY_UP     0x01
-#define GENESIS_KEY_DOWN   0x02
-#define GENESIS_KEY_LEFT   0x03
-#define GENESIS_KEY_RIGHT  0x04
-#define GENESIS_KEY_A      0x05
-#define GENESIS_KEY_B      0x06
-#define GENESIS_KEY_C      0x07
-#define GENESIS_KEY_START  0x08
-#define GENESIS_KEY_X      0x09
-#define GENESIS_KEY_Y      0x0A
-#define GENESIS_KEY_Z      0x0B
-#define GENESIS_KEY_MODE   0x0C
-#define GENESIS_KEY_SELECT 0x0D
-#define GENESIS_KEY_ESC    0x0E
-
-// HID to Genesis key mapping
+// HID to NES key mapping
 // Key mapping:
 //   Arrow keys -> D-pad (Up/Down/Left/Right)
-//   A, S, D    -> Genesis A, B, C buttons
-//   Q, W, E    -> Genesis X, Y, Z buttons (6-button mode)
-//   Enter      -> Start
+//   Z, X       -> NES B, A buttons
 //   Space      -> Select
-//   Alt        -> Mode (6-button)
-//   ESC        -> Settings menu
+//   Enter      -> Start
+//   ESC        -> Settings menu / Back
 // Returns 0 if no mapping
-static unsigned char hid_to_genesis(uint8_t code) {
+static unsigned char hid_to_nes(uint8_t code) {
     switch (code) {
         // Arrow keys -> D-pad
-        case 0x52: return GENESIS_KEY_UP;     // Up arrow
-        case 0x51: return GENESIS_KEY_DOWN;   // Down arrow
-        case 0x50: return GENESIS_KEY_LEFT;   // Left arrow
-        case 0x4F: return GENESIS_KEY_RIGHT;  // Right arrow
-        
-        // A, S, D -> Genesis A, B, C
-        case 0x04: return GENESIS_KEY_A;      // A key
-        case 0x16: return GENESIS_KEY_B;      // S key
-        case 0x07: return GENESIS_KEY_C;      // D key
-        
-        // Q, W, E -> Genesis X, Y, Z (6-button)
-        case 0x14: return GENESIS_KEY_X;      // Q key
-        case 0x1A: return GENESIS_KEY_Y;      // W key
-        case 0x08: return GENESIS_KEY_Z;      // E key
-        
+        case 0x52: return NES_KEY_UP;     // Up arrow
+        case 0x51: return NES_KEY_DOWN;   // Down arrow
+        case 0x50: return NES_KEY_LEFT;   // Left arrow
+        case 0x4F: return NES_KEY_RIGHT;  // Right arrow
+
+        // Z = B, X = A (standard NES keyboard convention)
+        case 0x1D: return NES_KEY_B;      // Z key
+        case 0x1B: return NES_KEY_A;      // X key
+
         // Start = Enter or Keypad Enter
-        case 0x28: return GENESIS_KEY_START;  // Enter
-        case 0x58: return GENESIS_KEY_START;  // Keypad Enter
-        
+        case 0x28: return NES_KEY_START;  // Enter
+        case 0x58: return NES_KEY_START;  // Keypad Enter
+
         // Select = Space
-        case 0x2C: return GENESIS_KEY_SELECT; // Space
-        
-        // Mode button (Left Alt or Right Alt)
-        case 0xE2: return GENESIS_KEY_MODE;   // Left Alt
-        case 0xE6: return GENESIS_KEY_MODE;   // Right Alt
-        
+        case 0x2C: return NES_KEY_SELECT; // Space
+
         // ESC = Settings menu / Back
-        case 0x29: return GENESIS_KEY_ESC;    // Escape
-        
+        case 0x29: return NES_KEY_ESC;    // Escape
+
         default: return 0;
     }
 }
@@ -120,7 +91,7 @@ static void key_handler(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev
                 }
             }
             if (!found) {
-                unsigned char k = hid_to_genesis(curr->keycode[i]);
+                unsigned char k = hid_to_nes(curr->keycode[i]);
                 if (k) queue_push(1, k);
             }
         }
@@ -137,7 +108,7 @@ static void key_handler(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev
                 }
             }
             if (!found) {
-                unsigned char k = hid_to_genesis(prev->keycode[i]);
+                unsigned char k = hid_to_nes(prev->keycode[i]);
                 if (k) queue_push(0, k);
             }
         }
@@ -145,25 +116,19 @@ static void key_handler(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev
 }
 
 static Ps2Kbd_Mrmltr* kbd = nullptr;
-static volatile uint16_t g_kbd_state = 0;  // Global keyboard state bitmask
+static volatile uint16_t g_kbd_state = 0;
 
-// Convert key code to state bit
 static uint16_t key_to_state_bit(uint8_t key) {
     switch (key) {
-        case GENESIS_KEY_UP:     return KBD_STATE_UP;
-        case GENESIS_KEY_DOWN:   return KBD_STATE_DOWN;
-        case GENESIS_KEY_LEFT:   return KBD_STATE_LEFT;
-        case GENESIS_KEY_RIGHT:  return KBD_STATE_RIGHT;
-        case GENESIS_KEY_A:      return KBD_STATE_A;
-        case GENESIS_KEY_B:      return KBD_STATE_B;
-        case GENESIS_KEY_C:      return KBD_STATE_C;
-        case GENESIS_KEY_START:  return KBD_STATE_START;
-        case GENESIS_KEY_X:      return KBD_STATE_X;
-        case GENESIS_KEY_Y:      return KBD_STATE_Y;
-        case GENESIS_KEY_Z:      return KBD_STATE_Z;
-        case GENESIS_KEY_MODE:   return KBD_STATE_MODE;
-        case GENESIS_KEY_SELECT: return KBD_STATE_SELECT;
-        case GENESIS_KEY_ESC:    return KBD_STATE_ESC;
+        case NES_KEY_UP:     return KBD_STATE_UP;
+        case NES_KEY_DOWN:   return KBD_STATE_DOWN;
+        case NES_KEY_LEFT:   return KBD_STATE_LEFT;
+        case NES_KEY_RIGHT:  return KBD_STATE_RIGHT;
+        case NES_KEY_A:      return KBD_STATE_A;
+        case NES_KEY_B:      return KBD_STATE_B;
+        case NES_KEY_SELECT: return KBD_STATE_SELECT;
+        case NES_KEY_START:  return KBD_STATE_START;
+        case NES_KEY_ESC:    return KBD_STATE_ESC;
         default: return 0;
     }
 }
@@ -176,9 +141,7 @@ extern "C" void ps2kbd_init(void) {
 
 extern "C" void ps2kbd_tick(void) {
     if (kbd) kbd->tick();
-    
-    // Update global state from queued events (peek, don't consume)
-    // Process all events and update g_kbd_state
+
     uint8_t p, k;
     while (queue_pop(&p, &k)) {
         uint16_t bit = key_to_state_bit(k);
@@ -193,8 +156,6 @@ extern "C" void ps2kbd_tick(void) {
 }
 
 extern "C" int ps2kbd_get_key(int* pressed, unsigned char* key) {
-    // This function is now deprecated - use ps2kbd_get_state() instead
-    // But keep it for compatibility - always returns 0 since we consume in tick()
     (void)pressed;
     (void)key;
     return 0;
@@ -203,4 +164,3 @@ extern "C" int ps2kbd_get_key(int* pressed, unsigned char* key) {
 extern "C" uint16_t ps2kbd_get_state(void) {
     return g_kbd_state;
 }
-

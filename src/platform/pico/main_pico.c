@@ -29,6 +29,7 @@
 #include "quicknes.h"
 #include "psram_init.h"
 #include "nespad.h"
+#include "ps2kbd_wrapper.h"
 #include "ff.h"
 
 /* 16KB stack in main SRAM — scratch_y (4KB) is too small for QuickNES */
@@ -487,6 +488,21 @@ static int nespad_to_qnes(uint32_t pad)
     return joy;
 }
 
+/* Convert PS/2 keyboard state to QuickNES joypad bitmask */
+static int ps2kbd_to_qnes(uint16_t kbd)
+{
+    int joy = 0;
+    if (kbd & KBD_STATE_A)      joy |= 0x01;
+    if (kbd & KBD_STATE_B)      joy |= 0x02;
+    if (kbd & KBD_STATE_SELECT) joy |= 0x04;
+    if (kbd & KBD_STATE_START)  joy |= 0x08;
+    if (kbd & KBD_STATE_UP)     joy |= 0x10;
+    if (kbd & KBD_STATE_DOWN)   joy |= 0x20;
+    if (kbd & KBD_STATE_LEFT)   joy |= 0x40;
+    if (kbd & KBD_STATE_RIGHT)  joy |= 0x80;
+    return joy;
+}
+
 static void real_main(void)
 {
     /* Overclock to 378 MHz — same pattern as murmgenesis */
@@ -594,6 +610,10 @@ static void real_main(void)
     nespad_begin(clock_get_hz(clk_sys) / 1000,
                  NESPAD_CLK_PIN, NESPAD_DATA_PIN, NESPAD_LATCH_PIN);
 
+    /* Init PS/2 keyboard (PIO0, CLK=GPIO2, DATA=GPIO3) */
+    ps2kbd_init();
+    printf("PS/2 keyboard initialized (CLK=%d, DATA=%d)\n", PS2_PIN_CLK, PS2_PIN_DATA);
+
     if (rom_loaded) {
         while (1) {
             /* Wait for vsync. No double-buffer gate — frame pointer is
@@ -605,7 +625,8 @@ static void real_main(void)
             /* Fresh gamepad read right at vsync — input from NOW, not
              * from the previous frame. ~100µs cost is negligible. */
             nespad_read();
-            int joypad1 = nespad_to_qnes(nespad_state);
+            ps2kbd_tick();
+            int joypad1 = nespad_to_qnes(nespad_state) | ps2kbd_to_qnes(ps2kbd_get_state());
             int joypad2 = nespad_to_qnes(nespad_state2);
 
             qnes_emulate_frame(joypad1, joypad2);
