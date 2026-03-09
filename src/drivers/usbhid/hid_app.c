@@ -455,25 +455,25 @@ static uint16_t hid_to_kbd_state_bit(uint8_t keycode) {
         case 0x50: return 0x0004; // Left arrow -> KBD_STATE_LEFT
         case 0x4F: return 0x0008; // Right arrow -> KBD_STATE_RIGHT
         
-        // A, S, D -> Genesis A, B, C
-        case 0x04: return 0x0010; // A key -> KBD_STATE_A
-        case 0x16: return 0x0020; // S key -> KBD_STATE_B
-        case 0x07: return 0x0040; // D key -> KBD_STATE_C
+        // WASD alternative for D-pad
+        case 0x1A: return 0x0001; // W key -> KBD_STATE_UP
+        case 0x16: return 0x0002; // S key -> KBD_STATE_DOWN
+        case 0x04: return 0x0004; // A key -> KBD_STATE_LEFT
+        case 0x07: return 0x0008; // D key -> KBD_STATE_RIGHT
         
-        // Q, W, E -> Genesis X, Y, Z
-        case 0x14: return 0x0100; // Q key -> KBD_STATE_X
-        case 0x1A: return 0x0200; // W key -> KBD_STATE_Y
-        case 0x08: return 0x0400; // E key -> KBD_STATE_Z
+        // Z = B, X = A (standard NES keyboard convention)
+        case 0x1B: return 0x0010; // X key -> KBD_STATE_A
+        case 0x1D: return 0x0020; // Z key -> KBD_STATE_B
         
-        // Enter, Keypad Enter -> Start
+        // Start = Enter or Keypad Enter
         case 0x28: return 0x0080; // Enter -> KBD_STATE_START
         case 0x58: return 0x0080; // Keypad Enter -> KBD_STATE_START
         
-        // Space -> Select
-        case 0x2C: return 0x1000; // Space -> KBD_STATE_SELECT
+        // Select = Space
+        case 0x2C: return 0x0040; // Space -> KBD_STATE_SELECT
         
-        // ESC -> Settings menu
-        case 0x29: return 0x2000; // Escape -> KBD_STATE_ESC
+        // ESC = Settings menu
+        case 0x29: return 0x0100; // Escape -> KBD_STATE_ESC
         
         default: return 0;
     }

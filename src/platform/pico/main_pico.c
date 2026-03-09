@@ -638,12 +638,13 @@ static void real_main(void)
              * applied immediately after emulation for lowest input latency. */
             uint32_t wait_start = time_us_32();
             while (!vsync_flag && (time_us_32() - wait_start) < 20000) {
-#if USB_HID_ENABLED
-                usbhid_task();
-#endif
                 __wfe();
             }
             vsync_flag = 0;
+
+#if USB_HID_ENABLED
+            usbhid_task();
+#endif
 
             /* Fresh gamepad read right at vsync — input from NOW, not
              * from the previous frame. ~100µs cost is negligible. */
