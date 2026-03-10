@@ -116,8 +116,8 @@ public:
 			return no_irq;
 
 		/* Predict when the target scanline will be reached */
-		int remain = irq_scanline - current_scanline;
-		if ( remain <= 0 )
+		int remain = irq_scanline - current_scanline - 1;
+		if ( remain < 0 )
 			return no_irq; /* already passed this frame */
 
 		long time = remain * 341L + next_scanline_time;
