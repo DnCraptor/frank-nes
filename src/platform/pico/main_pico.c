@@ -221,12 +221,17 @@ void __not_in_flash("scanline") scanline_callback(
 
     /* Borders (dst[0..31] and dst[288..319]) stay zero from BSS init —
      * line_buffer is static and only this callback writes to it.
-     *
-     * NES pixels: read 4 bytes at a time, pre-doubled palette lookup.
-     * ~576 SRAM accesses vs ~960 original, fitting within the ~2400
-     * cycle DMA ISR budget even under Core 0 SRAM contention. */
+     * We also crop the first 8 and last 8 NES pixels horizontally to hide
+     * edge artifacts (nametable update seams and overscan color borders)
+     * prevalent when scrolling in games like Castlevania 3 and SMB3.
+     */
     uint32_t *out = dst + 32;
-    for (int x = 0; x < NES_WIDTH; x += 4) {
+    
+    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
+    out[4] = 0; out[5] = 0; out[6] = 0; out[7] = 0;
+    out += 8;
+
+    for (int x = 8; x < NES_WIDTH - 8; x += 4) {
         uint32_t p = *(const uint32_t *)(src + x);
         out[0] = rgb565_palette_32[pal_read_idx][p & 0xFF];
         out[1] = rgb565_palette_32[pal_read_idx][(p >> 8) & 0xFF];
@@ -234,6 +239,9 @@ void __not_in_flash("scanline") scanline_callback(
         out[3] = rgb565_palette_32[pal_read_idx][(p >> 24)];
         out += 4;
     }
+
+    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
+    out[4] = 0; out[5] = 0; out[6] = 0; out[7] = 0;
 }
 
 /* Generate test pattern when no ROM is loaded */
