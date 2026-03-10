@@ -57,7 +57,10 @@ extern const uint8_t nes_rom_end[];
 /* Palette lookup: NES indexed pixel -> doubled RGB565 (two pixels per word).
  * Pre-doubled eliminates shift+OR in the scanline callback hot loop,
  * reducing SRAM accesses and keeping the DMA ISR within timing budget. */
-static uint32_t rgb565_palette_32[256];
+static uint32_t rgb565_palette_32[2][256];
+static int pal_write_idx = 0;
+static volatile int pal_read_idx = 0;
+static volatile int pending_pal_idx = -1;
 
 /* Pointer to current frame pixels — only updated during vblank by vsync_cb */
 static const uint8_t *frame_pixels;
@@ -80,6 +83,10 @@ static void __not_in_flash("vsync") vsync_cb(void)
         frame_pixels = pp;
         frame_pitch = pending_pitch;
         pending_pixels = NULL;
+        if (pending_pal_idx != -1) {
+            pal_read_idx = pending_pal_idx;
+            pending_pal_idx = -1;
+        }
     }
     vsync_flag = 1;
     __sev(); /* wake Core 0 from WFE */
@@ -182,7 +189,7 @@ static void audio_fill_silence(int count)
 }
 
 /* Build RGB565 palette from QuickNES frame palette + color table */
-static void update_palette(void)
+static void update_palette(int buf_idx)
 {
     int pal_size = 0;
     const int16_t *pal = qnes_get_palette(&pal_size);
@@ -197,7 +204,7 @@ static void update_palette(void)
             idx = 0x0F; /* black */
         const qnes_rgb_t *c = &colors[idx];
         uint16_t c16 = ((c->r & 0xF8) << 8) | ((c->g & 0xFC) << 3) | (c->b >> 3);
-        rgb565_palette_32[i] = c16 | ((uint32_t)c16 << 16);
+        rgb565_palette_32[buf_idx][i] = c16 | ((uint32_t)c16 << 16);
     }
 }
 
@@ -221,10 +228,10 @@ void __not_in_flash("scanline") scanline_callback(
     uint32_t *out = dst + 32;
     for (int x = 0; x < NES_WIDTH; x += 4) {
         uint32_t p = *(const uint32_t *)(src + x);
-        out[0] = rgb565_palette_32[p & 0xFF];
-        out[1] = rgb565_palette_32[(p >> 8) & 0xFF];
-        out[2] = rgb565_palette_32[(p >> 16) & 0xFF];
-        out[3] = rgb565_palette_32[(p >> 24)];
+        out[0] = rgb565_palette_32[pal_read_idx][p & 0xFF];
+        out[1] = rgb565_palette_32[pal_read_idx][(p >> 8) & 0xFF];
+        out[2] = rgb565_palette_32[pal_read_idx][(p >> 16) & 0xFF];
+        out[3] = rgb565_palette_32[pal_read_idx][(p >> 24)];
         out += 4;
     }
 }
@@ -240,8 +247,10 @@ static void generate_test_pattern(void)
     };
     for (int i = 0; i < 256; i++) {
         uint16_t c = bars[i % 8];
-        rgb565_palette_32[i] = c | ((uint32_t)c << 16);
+        rgb565_palette_32[pal_write_idx][i] = c | ((uint32_t)c << 16);
     }
+    pending_pal_idx = pal_write_idx;
+    pal_write_idx ^= 1;
 
     for (int y = 0; y < NES_HEIGHT; y++) {
         for (int x = 0; x < NES_WIDTH; x++) {
@@ -645,10 +654,11 @@ static void real_main(void)
 
     if (rom_loaded) {
         while (1) {
-            /* Wait for vsync — Core 1 applies pending frame during vblank,
-             * then signals us to emulate the next frame. */
+            /* Wait for vsync — Core 1 applies pending frame during vblank.
+             * We wait for pending_pixels to become NULL to ensure we don't
+             * overwrite a buffer that is currently being displayed. */
             uint32_t wait_start = time_us_32();
-            while (!vsync_flag && (time_us_32() - wait_start) < 20000) {
+            while (pending_pixels != NULL && (time_us_32() - wait_start) < 20000) {
 #if USB_HID_ENABLED
                 usbhid_task();
 #endif
@@ -704,7 +714,9 @@ static void real_main(void)
                 audio_push_samples(tmp, (int)n);
             }
 
-            update_palette();
+            update_palette(pal_write_idx);
+            pending_pal_idx = pal_write_idx;
+            pal_write_idx ^= 1;
 
             /* Post frame to pending buffer — vsync callback will apply it
              * during vblank for tear-free display. */
