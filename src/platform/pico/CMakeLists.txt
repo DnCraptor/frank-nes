@@ -75,6 +75,7 @@ set(EMU2413_SOURCES
 
 add_executable(murmnes
     ${PICODIR}/main_pico.c
+    ${PICODIR}/settings.c
     ${DRIVERSDIR}/psram/psram_init.c
     ${DRIVERSDIR}/psram/psram_allocator.c
     ${QNES_SOURCES}

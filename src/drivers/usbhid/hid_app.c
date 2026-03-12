@@ -41,12 +41,45 @@ static volatile int8_t cumulative_wheel = 0;
 static volatile uint8_t current_buttons = 0;
 static volatile int mouse_has_motion = 0;
 
-// Gamepad state
-static volatile int8_t gamepad_axis_x = 0;
-static volatile int8_t gamepad_axis_y = 0;
-static volatile uint8_t gamepad_dpad = 0;
-static volatile uint16_t gamepad_buttons = 0;
-static volatile int gamepad_connected = 0;
+// Gamepad state — two slots for two USB gamepads
+#define MAX_GAMEPADS 2
+
+typedef struct {
+    volatile int8_t axis_x;
+    volatile int8_t axis_y;
+    volatile uint8_t dpad;
+    volatile uint16_t buttons;
+    volatile int connected;
+    uint8_t dev_addr;   // TinyUSB device address (0 = slot free)
+    uint8_t instance;   // TinyUSB HID instance
+} gamepad_slot_t;
+
+static gamepad_slot_t gamepad_slots[MAX_GAMEPADS] = {0};
+
+// Find gamepad slot by dev_addr+instance, or allocate a new one. Returns -1 if full.
+static int find_or_alloc_gamepad_slot(uint8_t dev_addr, uint8_t inst) {
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (gamepad_slots[i].connected && gamepad_slots[i].dev_addr == dev_addr && gamepad_slots[i].instance == inst)
+            return i;
+    }
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (!gamepad_slots[i].connected) {
+            gamepad_slots[i].dev_addr = dev_addr;
+            gamepad_slots[i].instance = inst;
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Find gamepad slot by dev_addr (for unmount). Returns -1 if not found.
+static int find_gamepad_slot_by_dev(uint8_t dev_addr) {
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (gamepad_slots[i].connected && gamepad_slots[i].dev_addr == dev_addr)
+            return i;
+    }
+    return -1;
+}
 
 // Device connection state
 static volatile int keyboard_connected = 0;
@@ -86,7 +119,7 @@ static int find_keycode_in_report(hid_keyboard_report_t const *report, uint8_t k
 // Forward declarations
 static void process_kbd_report(hid_keyboard_report_t const *report, hid_keyboard_report_t const *prev_report);
 static void process_mouse_report(hid_mouse_report_t const *report);
-static void process_gamepad_report(uint8_t const *report, uint16_t len);
+static void process_gamepad_report(int slot, uint8_t const *report, uint16_t len);
 static void process_generic_report(uint8_t dev_addr, uint8_t instance, uint8_t const *report, uint16_t len);
 
 //--------------------------------------------------------------------
@@ -160,33 +193,35 @@ static void process_mouse_report(hid_mouse_report_t const *report) {
 // Handles common USB gamepad formats (Xbox-style, generic HID)
 //--------------------------------------------------------------------
 
-static void process_gamepad_report(uint8_t const *report, uint16_t len) {
+static void process_gamepad_report(int slot, uint8_t const *report, uint16_t len) {
     // Safety check
-    if (report == NULL || len < 7) return;
-    
+    if (slot < 0 || slot >= MAX_GAMEPADS || report == NULL || len < 7) return;
+
+    gamepad_slot_t *gp = &gamepad_slots[slot];
+
     // Format discovered:
     // Byte 3: D-pad X (0x00=Left, 0x7F=center, 0xFF=Right)
     // Byte 4: D-pad Y (0x00=Up, 0x7F=center, 0xFF=Down)
     // Byte 5: A(0x20), B(0x40), X(0x10), Y(0x80)
     // Byte 6: L-shift(0x01), R-shift(0x02), Select(0x10), Start(0x20)
-    
+
     // D-pad from bytes 3-4
-    gamepad_dpad = 0;
-    if (report[3] < 0x40) gamepad_dpad |= 0x04; // Left
-    if (report[3] > 0xC0) gamepad_dpad |= 0x08; // Right
-    if (report[4] < 0x40) gamepad_dpad |= 0x01; // Up
-    if (report[4] > 0xC0) gamepad_dpad |= 0x02; // Down
-    
+    gp->dpad = 0;
+    if (report[3] < 0x40) gp->dpad |= 0x04; // Left
+    if (report[3] > 0xC0) gp->dpad |= 0x08; // Right
+    if (report[4] < 0x40) gp->dpad |= 0x01; // Up
+    if (report[4] > 0xC0) gp->dpad |= 0x02; // Down
+
     // Buttons
-    gamepad_buttons = 0;
-    if (report[5] & 0x20) gamepad_buttons |= 0x01; // A → Genesis A
-    if (report[5] & 0x40) gamepad_buttons |= 0x02; // B → Genesis B
-    if (report[5] & 0x80) gamepad_buttons |= 0x04; // Y → Genesis C
-    if (report[5] & 0x10) gamepad_buttons |= 0x08; // X → Genesis X
-    if (report[6] & 0x01) gamepad_buttons |= 0x10; // L-shift → Genesis Y
-    if (report[6] & 0x02) gamepad_buttons |= 0x20; // R-shift → Genesis Z
-    if (report[6] & 0x20) gamepad_buttons |= 0x40; // Start → Start
-    if (report[6] & 0x10) gamepad_buttons |= 0x80; // Select → Mode
+    gp->buttons = 0;
+    if (report[5] & 0x20) gp->buttons |= 0x01; // A
+    if (report[5] & 0x40) gp->buttons |= 0x02; // B
+    if (report[5] & 0x80) gp->buttons |= 0x04; // Y -> C
+    if (report[5] & 0x10) gp->buttons |= 0x08; // X
+    if (report[6] & 0x01) gp->buttons |= 0x10; // L-shift -> Y
+    if (report[6] & 0x02) gp->buttons |= 0x20; // R-shift -> Z
+    if (report[6] & 0x20) gp->buttons |= 0x40; // Start
+    if (report[6] & 0x10) gp->buttons |= 0x80; // Select
 }
 
 //--------------------------------------------------------------------
@@ -239,9 +274,14 @@ static void process_generic_report(uint8_t dev_addr, uint8_t instance, uint8_t c
                 process_mouse_report((hid_mouse_report_t const *)report);
                 break;
             case HID_USAGE_DESKTOP_GAMEPAD:
-            case HID_USAGE_DESKTOP_JOYSTICK:
-                process_gamepad_report(report, len);
+            case HID_USAGE_DESKTOP_JOYSTICK: {
+                int slot = find_or_alloc_gamepad_slot(dev_addr, instance);
+                if (slot >= 0) {
+                    gamepad_slots[slot].connected = 1;
+                    process_gamepad_report(slot, report, len);
+                }
                 break;
+            }
             default:
                 break;
         }
@@ -286,24 +326,34 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
         printf("  -> Parsed %d reports from descriptor\n", hid_info[instance].report_count);
         
         // Check if it's a gamepad/joystick
+        bool is_gamepad = false;
         for (uint8_t i = 0; i < hid_info[instance].report_count && i < MAX_REPORT; i++) {
-            printf("  -> Report %d: usage_page=0x%02X, usage=0x%02X\n", 
+            printf("  -> Report %d: usage_page=0x%02X, usage=0x%02X\n",
                    i, hid_info[instance].report_info[i].usage_page,
                    hid_info[instance].report_info[i].usage);
             if (hid_info[instance].report_info[i].usage_page == HID_USAGE_PAGE_DESKTOP) {
                 uint8_t usage = hid_info[instance].report_info[i].usage;
                 if (usage == HID_USAGE_DESKTOP_GAMEPAD || usage == HID_USAGE_DESKTOP_JOYSTICK) {
-                    gamepad_connected = 1;
-                    printf("  -> GAMEPAD/JOYSTICK connected!\n");
+                    is_gamepad = true;
                 }
             }
         }
-        
+
         // If no gamepad detected from descriptor, assume it's a gamepad anyway
         // Many cheap gamepads don't report usage correctly
-        if (!gamepad_connected && hid_info[instance].report_count == 0) {
+        if (!is_gamepad && hid_info[instance].report_count == 0) {
             printf("  -> No reports parsed, assuming gamepad\n");
-            gamepad_connected = 1;
+            is_gamepad = true;
+        }
+
+        if (is_gamepad) {
+            int slot = find_or_alloc_gamepad_slot(dev_addr, instance);
+            if (slot >= 0) {
+                gamepad_slots[slot].connected = 1;
+                printf("  -> GAMEPAD assigned to slot %d\n", slot);
+            } else {
+                printf("  -> GAMEPAD slots full, ignored\n");
+            }
         }
     }
     
@@ -322,13 +372,17 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     } else if (itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
         mouse_connected = 0;
     } else if (itf_protocol == HID_ITF_PROTOCOL_NONE) {
-        // Could be a gamepad
-        printf("USB HID unmounted: gamepad disconnected\n");
-        gamepad_connected = 0;
-        gamepad_buttons = 0;
-        gamepad_dpad = 0;
-        gamepad_axis_x = 128;
-        gamepad_axis_y = 128;
+        // Could be a gamepad — find and clear the slot
+        int slot = find_gamepad_slot_by_dev(dev_addr);
+        if (slot >= 0) {
+            printf("USB HID unmounted: gamepad slot %d disconnected\n", slot);
+            gamepad_slots[slot].connected = 0;
+            gamepad_slots[slot].buttons = 0;
+            gamepad_slots[slot].dpad = 0;
+            gamepad_slots[slot].axis_x = 0;
+            gamepad_slots[slot].axis_y = 0;
+            gamepad_slots[slot].dev_addr = 0;
+        }
     }
 }
 
@@ -355,19 +409,21 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         
         default:
             // Generic device (gamepad/joystick) - simple direct parsing
-            // Skip complex report descriptor parsing, just read raw data
             if (report && len >= 2) {
                 // Print first few reports for debugging
                 if (report_debug_counter < 5) {
-                    printf("Gamepad report (len=%d): ", len);
+                    printf("Gamepad report (dev=%d, len=%d): ", dev_addr, len);
                     for (int i = 0; i < len && i < 16; i++) {
                         printf("%02X ", report[i]);
                     }
                     printf("\n");
                     report_debug_counter++;
                 }
-                gamepad_connected = 1;
-                process_gamepad_report(report, len);
+                int slot = find_or_alloc_gamepad_slot(dev_addr, instance);
+                if (slot >= 0) {
+                    gamepad_slots[slot].connected = 1;
+                    process_gamepad_report(slot, report, len);
+                }
             }
             break;
     }
@@ -497,18 +553,42 @@ uint16_t usbhid_get_kbd_state(void) {
     return state;
 }
 
-// Gamepad API functions
+// Gamepad API functions — index 0 or 1 for two USB gamepads
+int usbhid_gamepad_connected_idx(int idx) {
+    if (idx < 0 || idx >= MAX_GAMEPADS) return 0;
+    return gamepad_slots[idx].connected;
+}
+
+void usbhid_get_gamepad_state_idx(int idx, usbhid_gamepad_state_t *state) {
+    if (!state) return;
+    if (idx < 0 || idx >= MAX_GAMEPADS || !gamepad_slots[idx].connected) {
+        memset(state, 0, sizeof(*state));
+        return;
+    }
+    state->axis_x = gamepad_slots[idx].axis_x;
+    state->axis_y = gamepad_slots[idx].axis_y;
+    state->dpad = gamepad_slots[idx].dpad;
+    state->buttons = gamepad_slots[idx].buttons;
+    state->connected = gamepad_slots[idx].connected;
+}
+
+// Legacy API — returns combined state of all connected gamepads
 int usbhid_gamepad_connected(void) {
-    return gamepad_connected;
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (gamepad_slots[i].connected) return 1;
+    }
+    return 0;
 }
 
 void usbhid_get_gamepad_state(usbhid_gamepad_state_t *state) {
-    if (state) {
-        state->axis_x = gamepad_axis_x;
-        state->axis_y = gamepad_axis_y;
-        state->dpad = gamepad_dpad;
-        state->buttons = gamepad_buttons;
-        state->connected = gamepad_connected;
+    if (!state) return;
+    memset(state, 0, sizeof(*state));
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (gamepad_slots[i].connected) {
+            state->dpad |= gamepad_slots[i].dpad;
+            state->buttons |= gamepad_slots[i].buttons;
+            state->connected = 1;
+        }
     }
 }
 

@@ -30,6 +30,7 @@
 #include "psram_init.h"
 #include "nespad.h"
 #include "ps2kbd_wrapper.h"
+#include "settings.h"
 #include "ff.h"
 
 #if USB_HID_ENABLED
@@ -57,10 +58,10 @@ extern const uint8_t nes_rom_end[];
 /* Palette lookup: NES indexed pixel -> doubled RGB565 (two pixels per word).
  * Pre-doubled eliminates shift+OR in the scanline callback hot loop,
  * reducing SRAM accesses and keeping the DMA ISR within timing budget. */
-static uint32_t rgb565_palette_32[2][256];
-static int pal_write_idx = 0;
+uint32_t rgb565_palette_32[2][256];
+int pal_write_idx = 0;
 static volatile int pal_read_idx = 0;
-static volatile int pending_pal_idx = -1;
+volatile int pending_pal_idx = -1;
 
 /* Pointer to current frame pixels — only updated during vblank by vsync_cb */
 static const uint8_t *frame_pixels;
@@ -69,11 +70,11 @@ static long frame_pitch;
 /* Pending frame update: Core 0 writes here after emulation, Core 1 applies
    it during the next vsync callback (vblank). Ensures the pointer never
    changes while active scanlines are being displayed. */
-static volatile const uint8_t *pending_pixels;
-static volatile long pending_pitch;
+volatile const uint8_t *pending_pixels;
+volatile long pending_pitch;
 
 /* Vsync flag — set by Core 1 DMA ISR, cleared by Core 0 after emulating */
-static volatile uint32_t vsync_flag;
+volatile uint32_t vsync_flag;
 
 static void __not_in_flash("vsync") vsync_cb(void)
 {
@@ -175,7 +176,7 @@ static void __not_in_flash("audio") audio_push_samples(const int16_t *buf, int c
     hstx_di_queue_update_silence(audio_frame_counter);
 }
 
-static void audio_fill_silence(int count)
+void audio_fill_silence(int count)
 {
     int16_t silence[4] = {0};
     for (int i = 0; i < count / 4; i++) {
@@ -254,7 +255,7 @@ void __not_in_flash("scanline") scanline_callback(
 }
 
 /* Generate test pattern when no ROM is loaded */
-static uint8_t test_pixels[NES_WIDTH * NES_HEIGHT];
+uint8_t test_pixels[NES_WIDTH * NES_HEIGHT];
 
 static void generate_test_pattern(void)
 {
@@ -625,6 +626,9 @@ static void real_main(void)
     }
 #endif
 
+    /* Load settings from SD card (uses defaults if not found) */
+    settings_load();
+
     /* Start HDMI directly — all flash-heavy init is done */
     frame_pixels = test_pixels;
     frame_pitch = NES_WIDTH;
@@ -695,30 +699,66 @@ static void real_main(void)
             kbd_state |= usbhid_get_kbd_state();
 #endif
 
-            int joypad1 = nespad_to_qnes(nespad_state) | ps2kbd_to_qnes(kbd_state);
-            int joypad2 = nespad_to_qnes(nespad_state2);
+            /* Check for menu hotkey (Start+Select, F12) */
+            if (settings_check_hotkey()) {
+                settings_menu_show(test_pixels);
+                /* Restore game palette after menu */
+                update_palette(pal_write_idx);
+                pending_pal_idx = pal_write_idx;
+                pal_write_idx ^= 1;
+                continue;
+            }
+
+            /* Build per-source joypad values */
+            int nespad1_joy = nespad_to_qnes(nespad_state);
+            int nespad2_joy = nespad_to_qnes(nespad_state2);
+            int kbd_joy = ps2kbd_to_qnes(kbd_state);
+            int usb1_joy = 0, usb2_joy = 0;
 
 #if USB_HID_ENABLED
-            if (usbhid_gamepad_connected()) {
+            for (int ui = 0; ui < 2; ui++) {
+                if (!usbhid_gamepad_connected_idx(ui)) continue;
                 usbhid_gamepad_state_t gp;
-                usbhid_get_gamepad_state(&gp);
-                
-                int usb_joy = 0;
-                if (gp.dpad & 0x01) usb_joy |= 0x10; // Up
-                if (gp.dpad & 0x02) usb_joy |= 0x20; // Down
-                if (gp.dpad & 0x04) usb_joy |= 0x40; // Left
-                if (gp.dpad & 0x08) usb_joy |= 0x80; // Right
-                
-                if (gp.buttons & 0x01) usb_joy |= 0x01; // A -> NES A
-                if (gp.buttons & 0x02) usb_joy |= 0x02; // B -> NES B
-                if (gp.buttons & 0x04) usb_joy |= 0x01; // C -> NES A
-                if (gp.buttons & 0x08) usb_joy |= 0x02; // X -> NES B
-                if (gp.buttons & 0x40) usb_joy |= 0x08; // Start -> NES Start
-                if (gp.buttons & 0x80) usb_joy |= 0x04; // Select -> NES Select
-                
-                joypad1 |= usb_joy;
+                usbhid_get_gamepad_state_idx(ui, &gp);
+
+                int uj = 0;
+                if (gp.dpad & 0x01) uj |= 0x10; // Up
+                if (gp.dpad & 0x02) uj |= 0x20; // Down
+                if (gp.dpad & 0x04) uj |= 0x40; // Left
+                if (gp.dpad & 0x08) uj |= 0x80; // Right
+                if (gp.buttons & 0x01) uj |= 0x01; // A -> NES A
+                if (gp.buttons & 0x02) uj |= 0x02; // B -> NES B
+                if (gp.buttons & 0x04) uj |= 0x01; // C -> NES A
+                if (gp.buttons & 0x08) uj |= 0x02; // X -> NES B
+                if (gp.buttons & 0x40) uj |= 0x08; // Start -> NES Start
+                if (gp.buttons & 0x80) uj |= 0x04; // Select -> NES Select
+
+                if (ui == 0) usb1_joy = uj; else usb2_joy = uj;
             }
 #endif
+
+            /* Route inputs based on settings */
+            int joypad1 = 0, joypad2 = 0;
+
+            switch (g_settings.p1_mode) {
+                case INPUT_MODE_ANY:      joypad1 = nespad1_joy | nespad2_joy | kbd_joy | usb1_joy | usb2_joy; break;
+                case INPUT_MODE_NES1:     joypad1 = nespad1_joy; break;
+                case INPUT_MODE_NES2:     joypad1 = nespad2_joy; break;
+                case INPUT_MODE_USB1:     joypad1 = usb1_joy; break;
+                case INPUT_MODE_USB2:     joypad1 = usb2_joy; break;
+                case INPUT_MODE_KEYBOARD: joypad1 = kbd_joy; break;
+                case INPUT_MODE_DISABLED: break;
+            }
+
+            switch (g_settings.p2_mode) {
+                case INPUT_MODE_ANY:      joypad2 = nespad1_joy | nespad2_joy | kbd_joy | usb1_joy | usb2_joy; break;
+                case INPUT_MODE_NES1:     joypad2 = nespad1_joy; break;
+                case INPUT_MODE_NES2:     joypad2 = nespad2_joy; break;
+                case INPUT_MODE_USB1:     joypad2 = usb1_joy; break;
+                case INPUT_MODE_USB2:     joypad2 = usb2_joy; break;
+                case INPUT_MODE_KEYBOARD: joypad2 = kbd_joy; break;
+                case INPUT_MODE_DISABLED: break;
+            }
 
             qnes_emulate_frame(joypad1, joypad2);
 

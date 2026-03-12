@@ -101,16 +101,30 @@ int usbhid_get_key_action(uint8_t *keycode, int *down);
 uint16_t usbhid_get_kbd_state(void);
 
 /**
- * Check if a USB gamepad is connected
- * @return Non-zero if gamepad connected
+ * Check if a USB gamepad is connected (any slot)
+ * @return Non-zero if at least one gamepad connected
  */
 int usbhid_gamepad_connected(void);
 
 /**
- * Get current gamepad state
+ * Get combined gamepad state (all connected gamepads merged)
  * @param state Pointer to state structure to fill
  */
 void usbhid_get_gamepad_state(usbhid_gamepad_state_t *state);
+
+/**
+ * Check if USB gamepad at specific slot (0 or 1) is connected
+ * @param idx Gamepad slot index (0 or 1)
+ * @return Non-zero if gamepad connected at this slot
+ */
+int usbhid_gamepad_connected_idx(int idx);
+
+/**
+ * Get gamepad state for specific slot (0 or 1)
+ * @param idx Gamepad slot index (0 or 1)
+ * @param state Pointer to state structure to fill
+ */
+void usbhid_get_gamepad_state_idx(int idx, usbhid_gamepad_state_t *state);
 
 #ifdef __cplusplus
 }
