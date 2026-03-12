@@ -102,9 +102,11 @@ static uint8_t rgb555_to_pal(uint16_t p) {
     return (uint8_t)(PAL_CUBE_BASE + ri * 36 + gi * 6 + bi);
 }
 
-/* ─── Framebuffer helpers (8-bit indexed into test_pixels) ────────── */
+/* ─── Framebuffer helpers (double-buffered to avoid tearing) ──────── */
 
-static uint8_t *fb;  /* = test_pixels */
+static uint8_t sel_backbuf[SCREEN_W * SCREEN_H];
+static uint8_t *fb;       /* buffer being drawn to */
+static uint8_t *fb_show;  /* buffer being displayed by Core 1 */
 
 static inline void fb_pixel(int x, int y, uint8_t color) {
     if (x >= 0 && x < SCREEN_W && y >= 0 && y < SCREEN_H)
@@ -293,87 +295,89 @@ static void ensure_crc(int idx) {
     }
 }
 
-/* ─── Metadata (pre-loaded into memory at startup) ────────────────── */
-
-/* All images stored sequentially in PSRAM starting at 3MB offset */
-#define IMG_PSRAM_BASE (0x11000000 + 3 * 1024 * 1024)
+/* ─── Metadata (titles pre-loaded, images loaded on-the-fly) ──────── */
 
 typedef struct {
-    uint16_t width, height;
-    uint16_t *pixels;  /* points into PSRAM, NULL if no image */
     char title[64];    /* game title from metadata, or empty */
 } rom_meta_t;
 
 /* Also in PSRAM (after rom_list) */
 #define ROMMETA_PSRAM_BASE (ROMLIST_PSRAM_BASE + MAX_ROMS * sizeof(rom_entry_t))
 static rom_meta_t *rom_meta;  /* -> PSRAM */
-static uint32_t psram_alloc_offset = 0;  /* running PSRAM allocation pointer */
 
-static void load_rom_metadata(int idx) {
-    rom_meta[idx].width = 0;
-    rom_meta[idx].height = 0;
-    rom_meta[idx].pixels = NULL;
+/* Single image buffer in SRAM — avoids PSRAM/QMI bus contention with HDMI */
+#define IMG_BUF_BYTES (40 * 1024)
+static uint8_t img_sram_buf[IMG_BUF_BYTES] __attribute__((aligned(4)));
+static uint16_t cur_img_w, cur_img_h;
+static uint16_t *cur_img_pixels;  /* -> img_sram_buf or NULL */
+static int cur_img_idx = -1;
+
+static void load_rom_title(int idx) {
     rom_meta[idx].title[0] = '\0';
 
     if (!rom_list[idx].crc_valid) return;
     uint32_t crc = rom_list[idx].crc;
     char hex_char = "0123456789ABCDEF"[(crc >> 28) & 0xF];
 
-    /* Load title */
-    {
-        char path[128];
-        snprintf(path, sizeof(path), "/nes/metadata/descr/%c/%08lX.txt", hex_char, (unsigned long)crc);
-        FIL fil;
-        if (f_open(&fil, path, FA_READ) == FR_OK) {
-            char buf[512];
-            UINT br;
-            if (f_read(&fil, buf, sizeof(buf) - 1, &br) == FR_OK) {
-                buf[br] = '\0';
-                char *start = strstr(buf, "<name>");
-                if (start) {
-                    start += 6;
-                    char *end = strstr(start, "</name>");
-                    if (end) {
-                        int len = end - start;
-                        if (len > 63) len = 63;
-                        memcpy(rom_meta[idx].title, start, len);
-                        rom_meta[idx].title[len] = '\0';
-                    }
+    char path[128];
+    snprintf(path, sizeof(path), "/nes/metadata/descr/%c/%08lX.txt", hex_char, (unsigned long)crc);
+    FIL fil;
+    if (f_open(&fil, path, FA_READ) == FR_OK) {
+        char buf[512];
+        UINT br;
+        if (f_read(&fil, buf, sizeof(buf) - 1, &br) == FR_OK) {
+            buf[br] = '\0';
+            char *start = strstr(buf, "<name>");
+            if (start) {
+                start += 6;
+                char *end = strstr(start, "</name>");
+                if (end) {
+                    int len = end - start;
+                    if (len > 63) len = 63;
+                    memcpy(rom_meta[idx].title, start, len);
+                    rom_meta[idx].title[len] = '\0';
                 }
             }
-            f_close(&fil);
-        }
-    }
-
-    /* Load image into PSRAM */
-    {
-        char path[128];
-        snprintf(path, sizeof(path), "/nes/metadata/Images/160/%c/%08lX.555", hex_char, (unsigned long)crc);
-        FIL fil;
-        if (f_open(&fil, path, FA_READ) != FR_OK) return;
-
-        uint8_t hdr[4];
-        UINT br;
-        if (f_read(&fil, hdr, 4, &br) != FR_OK || br != 4) { f_close(&fil); return; }
-
-        uint16_t w = hdr[0] | (hdr[1] << 8);
-        uint16_t h = hdr[2] | (hdr[3] << 8);
-        if (w == 0 || w > 320 || h == 0 || h > 240) { f_close(&fil); return; }
-
-        uint32_t data_size = (uint32_t)w * h * 2;
-        uint16_t *pixels = (uint16_t *)(IMG_PSRAM_BASE + psram_alloc_offset);
-
-        if (f_read(&fil, pixels, data_size, &br) == FR_OK && br == data_size) {
-            rom_meta[idx].width = w;
-            rom_meta[idx].height = h;
-            rom_meta[idx].pixels = pixels;
-            psram_alloc_offset += data_size;
-            /* Align to 4 bytes */
-            psram_alloc_offset = (psram_alloc_offset + 3) & ~3;
-            printf("Image: %s (%dx%d)\n", path, w, h);
         }
         f_close(&fil);
     }
+}
+
+/* Load cover art for a single ROM from SD into the shared image buffer.
+ * SD must already be mounted by the caller. */
+static void load_rom_image(int idx) {
+    cur_img_pixels = NULL;
+    cur_img_w = 0;
+    cur_img_h = 0;
+    cur_img_idx = idx;
+
+    if (!rom_list[idx].crc_valid) return;
+    uint32_t crc = rom_list[idx].crc;
+    char hex_char = "0123456789ABCDEF"[(crc >> 28) & 0xF];
+
+    char path[128];
+    snprintf(path, sizeof(path), "/nes/metadata/Images/160/%c/%08lX.555", hex_char, (unsigned long)crc);
+
+    FIL fil;
+    if (f_open(&fil, path, FA_READ) != FR_OK) return;
+
+    uint8_t hdr[4];
+    UINT br;
+    if (f_read(&fil, hdr, 4, &br) != FR_OK || br != 4) { f_close(&fil); return; }
+
+    uint16_t w = hdr[0] | (hdr[1] << 8);
+    uint16_t h = hdr[2] | (hdr[3] << 8);
+    if (w == 0 || w > 320 || h == 0 || h > 240) { f_close(&fil); return; }
+
+    uint32_t data_size = (uint32_t)w * h * 2;
+    if (data_size > IMG_BUF_BYTES) { f_close(&fil); return; }
+
+    if (f_read(&fil, img_sram_buf, data_size, &br) == FR_OK && br == data_size) {
+        cur_img_pixels = (uint16_t *)img_sram_buf;
+        cur_img_w = w;
+        cur_img_h = h;
+    }
+    f_close(&fil);
 }
 
 /* ─── NES-style cartridge rendering (pixel-perfect) ──────────────── */
@@ -470,10 +474,9 @@ static void draw_cartridge(int selected) {
     fb_vline(LABEL_X + LABEL_W, LABEL_Y - 1, LABEL_H + 2, PAL_CART_DARK);
 
     /* ── Blit image into label (top-aligned, width-limited, no crop) ── */
-    rom_meta_t *meta = &rom_meta[selected];
-    if (meta->pixels) {
-        int iw = meta->width;
-        int ih = meta->height;
+    if (cur_img_pixels && cur_img_idx == selected) {
+        int iw = cur_img_w;
+        int ih = cur_img_h;
         /* Scale to fit label width if needed */
         if (iw > LABEL_W) {
             ih = ih * LABEL_W / iw;
@@ -485,10 +488,10 @@ static void draw_cartridge(int selected) {
         int iy = LABEL_Y;
 
         for (int y = 0; y < ih; y++) {
-            int sy = y * meta->height / ih;
+            int sy = y * cur_img_h / ih;
             for (int x = 0; x < iw; x++) {
-                int sx = x * meta->width / iw;
-                uint16_t px = meta->pixels[sy * meta->width + sx];
+                int sx = x * cur_img_w / iw;
+                uint16_t px = cur_img_pixels[sy * cur_img_w + sx];
                 fb_pixel(ix + x, iy + y, rgb555_to_pal(px));
             }
         }
@@ -506,7 +509,7 @@ static void draw_cartridge(int selected) {
     fb_hline(CART_X + 1, BASE_Y + 1, CART_W - 2, PAL_CART_LIGHT);
 
     /* ── Title below cartridge ── */
-    const char *title = meta->title[0] ? meta->title : rom_list[selected].filename;
+    const char *title = rom_meta[selected].title[0] ? rom_meta[selected].title : rom_list[selected].filename;
     char dt[40];
     int max_c = (SCREEN_W - 20) / 6;
     if (max_c > 39) max_c = 39;
@@ -636,11 +639,10 @@ int rom_selector_preload(long *out_rom_size) {
         }
     }
 
-    /* CRCs + metadata */
-    psram_alloc_offset = 0;
+    /* CRCs + titles (images loaded on-the-fly during selector UI) */
     for (int i = 0; i < rom_count; i++) {
         ensure_crc(i);
-        load_rom_metadata(i);
+        load_rom_title(i);
     }
 
     /* For single ROM, pre-set the selection */
@@ -661,21 +663,48 @@ int rom_selector_preload(long *out_rom_size) {
     return count;
 }
 
-/* ─── Show: pure display, ZERO SD card access ─────────────────────── */
+/* ─── Show: images loaded from SD on-the-fly ──────────────────────── */
 
 bool rom_selector_show(long *out_rom_size) {
+    /* Double buffer: draw to one buffer while Core 1 displays the other */
     fb = test_pixels;
+    fb_show = sel_backbuf;
     setup_selector_palette();
 
-    /* Return the selected ROM index — ROM loading handled by caller */
+    /* Mount SD once for the entire selector session to avoid
+     * repeated disk_initialize/PIO reinit on every image load. */
+    static FATFS show_fs;
+    bool sd_ok = (f_mount(&show_fs, "", 1) == FR_OK);
+
     int selected = 0;
     int prev_selected = -1;
     int prev_buttons = 0;
     uint32_t hold_counter = 0;
+    bool needs_redraw = true;
+    cur_img_idx = -1;
+
+    /* Load first image before entering the loop */
+    if (sd_ok) load_rom_image(0);
 
     while (1) {
         selector_wait_vsync();
 
+        if (needs_redraw) {
+            /* Draw to back buffer (not being displayed) */
+            draw_cartridge(selected);
+            /* Swap buffers: the newly drawn buffer becomes the display buffer */
+            uint8_t *tmp = fb;
+            fb = fb_show;
+            fb_show = tmp;
+            needs_redraw = false;
+        }
+
+        audio_fill_silence(SAMPLE_RATE / 60);
+        pending_pitch = SCREEN_W;
+        pending_pixels = fb_show;
+
+        /* Input and SD I/O happen after posting — safe to block here
+         * without affecting the currently displayed frame. */
         int buttons = read_selector_buttons();
         int pressed = buttons & ~prev_buttons;
         if (buttons != 0 && buttons == prev_buttons) {
@@ -698,16 +727,14 @@ bool rom_selector_show(long *out_rom_size) {
             *out_rom_size = rom_list[selected].rom_size;
             printf("Selected: %s (%ld bytes)\n",
                    rom_list[selected].filename, rom_list[selected].rom_size);
+            f_unmount("");
             return true;
         }
 
         if (selected != prev_selected) {
             prev_selected = selected;
-            draw_cartridge(selected);
+            if (sd_ok) load_rom_image(selected);
+            needs_redraw = true;
         }
-
-        audio_fill_silence(SAMPLE_RATE / 60);
-        pending_pitch = SCREEN_W;
-        pending_pixels = fb;
     }
 }
