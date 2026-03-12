@@ -184,17 +184,27 @@ public:
     }
 };
 
-/* Static Nes_State to avoid ~25KB stack allocation */
-static Nes_State save_load_state;
+/* Nes_State allocated on demand to avoid permanent ~25KB SRAM usage */
+static Nes_State *save_load_state = NULL;
+
+static Nes_State *get_save_load_state(void) {
+    if (!save_load_state) {
+        save_load_state = new Nes_State;
+    }
+    return save_load_state;
+}
 
 int qnes_save_state(qnes_file_t file)
 {
     if (!rom_loaded) return -1;
 
-    emu->save_state(&save_load_state);
+    Nes_State *state = get_save_load_state();
+    if (!state) return -1;
+
+    emu->save_state(state);
 
     FatFS_Writer writer((FIL *)file);
-    const char *err = save_load_state.write(Auto_File_Writer(writer));
+    const char *err = state->write(Auto_File_Writer(writer));
     if (err) {
         printf("qnes_save_state: %s\n", err);
         return -1;
@@ -209,13 +219,16 @@ int qnes_load_state(qnes_file_t file, long file_size)
     FatFS_Reader reader((FIL *)file, file_size);
     Auto_File_Reader in(reader);
 
-    const char *err = save_load_state.read(in);
+    Nes_State *state = get_save_load_state();
+    if (!state) return -1;
+
+    const char *err = state->read(in);
     if (err) {
         printf("qnes_load_state: %s\n", err);
         return -1;
     }
 
-    emu->load_state(save_load_state);
+    emu->load_state(*state);
     return 0;
 }
 

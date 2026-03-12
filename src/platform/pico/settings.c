@@ -504,6 +504,9 @@ static int read_menu_buttons(void) {
 
 /* ─── Save state (SD card) ────────────────────────────────────────── */
 
+/* Shared FATFS instance to save ~1.1KB of static SRAM */
+static FATFS shared_fs;
+
 static void get_save_path(char *path, size_t path_size) {
     snprintf(path, path_size, "/nes/.save/%s.sav", g_rom_name);
 }
@@ -518,8 +521,8 @@ static bool check_save_exists(void) {
     get_save_path(path, sizeof(path));
     printf("check_save: path=%s\n", path);
 
-    static FATFS check_fs;
-    FRESULT fr = f_mount(&check_fs, "", 1);
+    
+    FRESULT fr = f_mount(&shared_fs, "", 1);
     if (fr != FR_OK) {
         printf("check_save: mount failed (%d)\n", fr);
         return false;
@@ -535,13 +538,13 @@ static bool check_save_exists(void) {
 static const char *save_error = NULL;
 
 static bool do_save_game(void) {
-    static FATFS save_fs;
+    
     save_error = NULL;
 
     printf("do_save: rom_name='%s'\n", g_rom_name);
     if (g_rom_name[0] == '\0') { save_error = "NO ROM NAME"; return false; }
 
-    FRESULT fr = f_mount(&save_fs, "", 1);
+    FRESULT fr = f_mount(&shared_fs, "", 1);
     printf("do_save: f_mount=%d\n", fr);
     if (fr != FR_OK) { save_error = "SD MOUNT FAIL"; return false; }
 
@@ -576,8 +579,8 @@ static bool do_save_game(void) {
 static bool do_load_game(void) {
     if (g_rom_name[0] == '\0') return false;
 
-    static FATFS load_fs;
-    if (f_mount(&load_fs, "", 1) != FR_OK) return false;
+    
+    if (f_mount(&shared_fs, "", 1) != FR_OK) return false;
 
     char path[128];
     get_save_path(path, sizeof(path));
@@ -639,8 +642,8 @@ static const char *input_mode_ini_names[] = {"any", "nes1", "nes2", "usb1", "usb
 static const char *audio_mode_ini_names[] = {"hdmi", "i2s", "disabled"};
 
 void settings_load(void) {
-    FATFS fs;
-    if (f_mount(&fs, "", 1) != FR_OK) return;
+
+    if (f_mount(&shared_fs, "", 1) != FR_OK) return;
 
     FIL file;
     if (f_open(&file, SETTINGS_PATH, FA_READ) != FR_OK) {
@@ -679,8 +682,8 @@ void settings_load(void) {
 }
 
 void settings_save(void) {
-    FATFS fs;
-    if (f_mount(&fs, "", 1) != FR_OK) return;
+
+    if (f_mount(&shared_fs, "", 1) != FR_OK) return;
 
     f_mkdir("/nes");
 

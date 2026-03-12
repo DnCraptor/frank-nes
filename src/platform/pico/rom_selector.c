@@ -239,7 +239,7 @@ static uint32_t crc32_file(FIL *fil, int skip) {
     return crc ^ 0xFFFFFFFF;
 }
 
-/* ─── ROM list ────────────────────────────────────────────────────── */
+/* ─── ROM list (allocated in PSRAM to save SRAM) ──────────────────── */
 
 #define MAX_ROMS 128
 
@@ -249,7 +249,9 @@ typedef struct {
     bool crc_valid;
 } rom_entry_t;
 
-static rom_entry_t rom_list[MAX_ROMS];
+/* Placed in PSRAM at 4MB offset (after images at 3MB) */
+#define ROMLIST_PSRAM_BASE (0x11000000 + 4 * 1024 * 1024)
+static rom_entry_t *rom_list;  /* -> PSRAM */
 static int rom_count = 0;
 
 static int scan_roms(void) {
@@ -298,7 +300,9 @@ typedef struct {
     char title[64];    /* game title from metadata, or empty */
 } rom_meta_t;
 
-static rom_meta_t rom_meta[MAX_ROMS];
+/* Also in PSRAM (after rom_list) */
+#define ROMMETA_PSRAM_BASE (ROMLIST_PSRAM_BASE + MAX_ROMS * sizeof(rom_entry_t))
+static rom_meta_t *rom_meta;  /* -> PSRAM */
 static uint32_t psram_alloc_offset = 0;  /* running PSRAM allocation pointer */
 
 static void load_rom_metadata(int idx) {
@@ -589,6 +593,12 @@ static void preload_all_roms(void) {
 
 bool rom_selector_show(long *out_rom_size) {
     fb = test_pixels;
+
+    /* Point rom_list and rom_meta into PSRAM */
+    rom_list = (rom_entry_t *)ROMLIST_PSRAM_BASE;
+    rom_meta = (rom_meta_t *)ROMMETA_PSRAM_BASE;
+    memset(rom_list, 0, MAX_ROMS * sizeof(rom_entry_t));
+    memset(rom_meta, 0, MAX_ROMS * sizeof(rom_meta_t));
 
     static FATFS sel_fs;
     if (f_mount(&sel_fs, "", 1) != FR_OK) {
