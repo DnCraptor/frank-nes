@@ -373,6 +373,10 @@ static void save_last_rom(int selected) {
 
 typedef struct {
     char title[64];    /* game title from metadata, or empty */
+    char desc[256];    /* game description, truncated */
+    char year[8];      /* release year, e.g. "1990" */
+    char genre[48];    /* genre string */
+    char players[8];   /* number of players, e.g. "1" or "2" */
 } rom_meta_t;
 
 /* Also in PSRAM (after rom_list) */
@@ -386,8 +390,47 @@ static uint16_t cur_img_w, cur_img_h;
 static uint16_t *cur_img_pixels;  /* -> img_sram_buf or NULL */
 static int cur_img_idx = -1;
 
+/* Extract text between <tag> and </tag> from buf into dst (max dst_size-1 chars) */
+static void extract_xml_tag(const char *buf, const char *tag, char *dst, int dst_size) {
+    dst[0] = '\0';
+    char open[32], close[32];
+    snprintf(open, sizeof(open), "<%s>", tag);
+    snprintf(close, sizeof(close), "</%s>", tag);
+    const char *start = strstr(buf, open);
+    if (!start) return;
+    start += strlen(open);
+    const char *end = strstr(start, close);
+    if (!end) return;
+    int src_len = end - start;
+    /* Copy while collapsing newlines and runs of whitespace into single spaces */
+    int di = 0;
+    bool prev_space = false;
+    int max_out = dst_size - 4;  /* reserve room for "..." */
+    int si;
+    for (si = 0; si < src_len && di < max_out; si++) {
+        char c = start[si];
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        if (c == ' ') {
+            if (!prev_space && di > 0) { dst[di++] = ' '; prev_space = true; }
+        } else {
+            dst[di++] = c;
+            prev_space = false;
+        }
+    }
+    /* If we didn't consume all source chars, text was truncated */
+    if (si < src_len) {
+        while (di > 0 && dst[di - 1] == ' ') di--;
+        dst[di++] = '.'; dst[di++] = '.'; dst[di++] = '.';
+    }
+    dst[di] = '\0';
+}
+
 static void load_rom_title(int idx) {
     rom_meta[idx].title[0] = '\0';
+    rom_meta[idx].desc[0] = '\0';
+    rom_meta[idx].year[0] = '\0';
+    rom_meta[idx].genre[0] = '\0';
+    rom_meta[idx].players[0] = '\0';
 
     if (!rom_list[idx].crc_valid) return;
     uint32_t crc = rom_list[idx].crc;
@@ -397,20 +440,22 @@ static void load_rom_title(int idx) {
     snprintf(path, sizeof(path), "/nes/metadata/descr/%c/%08lX.txt", hex_char, (unsigned long)crc);
     FIL fil;
     if (f_open(&fil, path, FA_READ) == FR_OK) {
-        char buf[512];
+        /* Read enough for all fields — metadata files are typically 0.5-1.5KB */
+        char buf[1536];
         UINT br;
         if (f_read(&fil, buf, sizeof(buf) - 1, &br) == FR_OK) {
             buf[br] = '\0';
-            char *start = strstr(buf, "<name>");
-            if (start) {
-                start += 6;
-                char *end = strstr(start, "</name>");
-                if (end) {
-                    int len = end - start;
-                    if (len > 63) len = 63;
-                    memcpy(rom_meta[idx].title, start, len);
-                    rom_meta[idx].title[len] = '\0';
-                }
+            extract_xml_tag(buf, "name", rom_meta[idx].title, sizeof(rom_meta[idx].title));
+            extract_xml_tag(buf, "desc", rom_meta[idx].desc, sizeof(rom_meta[idx].desc));
+            extract_xml_tag(buf, "genre", rom_meta[idx].genre, sizeof(rom_meta[idx].genre));
+            extract_xml_tag(buf, "players", rom_meta[idx].players, sizeof(rom_meta[idx].players));
+
+            /* Extract year from releasedate (format: YYYYMMDDTHHMMSS) */
+            char datestr[32];
+            extract_xml_tag(buf, "releasedate", datestr, sizeof(datestr));
+            if (datestr[0] && strlen(datestr) >= 4) {
+                memcpy(rom_meta[idx].year, datestr, 4);
+                rom_meta[idx].year[4] = '\0';
             }
         }
         f_close(&fil);
@@ -585,22 +630,186 @@ static void draw_cart_at(int cx, int cy, int rom_idx) {
     fb_hline(cx + 1, base_y + 1, CART_W - 2, PAL_CART_LIGHT);
 }
 
+/* ─── Info panel state machine ─────────────────────────────────────── */
+
+typedef enum {
+    INFO_HIDDEN,
+    INFO_SLIDING_IN,
+    INFO_SHOWN,
+    INFO_SLIDING_OUT,
+} info_state_t;
+
+#define INFO_ANIM_FRAMES 10
+static info_state_t info_state = INFO_HIDDEN;
+static int info_anim_frame = 0;
+
+/* Cart X when info is fully shown: only 20% visible on left */
+#define INFO_CART_X  (-(CART_W * 80 / 100))
+
+static int info_ease(int frame) {
+    int t = frame * 256 / INFO_ANIM_FRAMES;
+    return t * (512 - t) / 256;
+}
+
+static int info_cart_x(void) {
+    switch (info_state) {
+    case INFO_HIDDEN:
+        return CART_X;
+    case INFO_SLIDING_IN: {
+        int p = info_ease(info_anim_frame);
+        return CART_X + (INFO_CART_X - CART_X) * p / 256;
+    }
+    case INFO_SHOWN:
+        return INFO_CART_X;
+    case INFO_SLIDING_OUT: {
+        int p = info_ease(info_anim_frame);
+        return INFO_CART_X + (CART_X - INFO_CART_X) * p / 256;
+    }
+    }
+    return CART_X;
+}
+
+/* ─── Word-wrapped text drawing ───────────────────────────────────── */
+
+static int fb_text_wrap(int x, int y, int max_w, const char *s, uint8_t color, int max_lines) {
+    int char_w = 6;
+    int line_h = 9;
+    int max_chars = max_w / char_w;
+    if (max_chars < 1) max_chars = 1;
+    int line = 0;
+    const char *p = s;
+    while (*p && line < max_lines) {
+        int len = (int)strlen(p);
+        if (len <= max_chars) {
+            fb_text(x, y, p, color);
+            y += line_h;
+            break;
+        }
+        /* Find last space within max_chars */
+        int brk = max_chars;
+        for (int i = max_chars; i > 0; i--) {
+            if (p[i] == ' ') { brk = i; break; }
+        }
+        char tmp[64];
+        int copy = brk;
+        if (copy > 63) copy = 63;
+        memcpy(tmp, p, copy);
+        tmp[copy] = '\0';
+        /* Last allowed line with more text: add "..." */
+        if (line == max_lines - 1 && (int)strlen(p) > brk) {
+            if (copy > 3) copy -= 3;
+            tmp[copy] = '.'; tmp[copy+1] = '.'; tmp[copy+2] = '.'; tmp[copy+3] = '\0';
+        }
+        fb_text(x, y, tmp, color);
+        y += line_h;
+        line++;
+        p += brk;
+        while (*p == ' ') p++;
+    }
+    return y;
+}
+
 /* ─── UI text (fixed position, drawn separately from cart) ────────── */
 
-static void draw_selector_text(int selected) {
+static void draw_info_panel(int selected) {
+    /* Info text area starts after the cartridge's visible sliver */
+    int text_x = INFO_CART_X + CART_W + 8;
+    int text_w = SCREEN_W - text_x - 6;
+    int ty = CART_Y + 4;
+
+    /* Title */
     const char *title = rom_meta[selected].title[0] ? rom_meta[selected].title : rom_list[selected].filename;
     char dt[40];
-    int max_c = (SCREEN_W - 20) / 6;
+    int max_c = text_w / 6;
     if (max_c > 39) max_c = 39;
-    strncpy(dt, title, max_c);
-    dt[max_c] = '\0';
-    fb_text_center(CART_Y + CART_H + 16, dt, PAL_WHITE);
+    int tlen = (int)strlen(title);
+    if (tlen > max_c) {
+        int cut = max_c > 3 ? max_c - 3 : 0;
+        memcpy(dt, title, cut);
+        dt[cut] = '.'; dt[cut+1] = '.'; dt[cut+2] = '.'; dt[cut+3] = '\0';
+    } else {
+        memcpy(dt, title, tlen); dt[tlen] = '\0';
+    }
+    fb_text(text_x, ty, dt, PAL_WHITE);
+    ty += 14;
 
-    char counter[16];
-    snprintf(counter, sizeof(counter), "%d / %d", selected + 1, rom_count);
-    fb_text_center(CART_Y + CART_H + 30, counter, PAL_GRAY);
+    /* Separator line */
+    fb_hline(text_x, ty, text_w, PAL_CART_RIDGE);
+    ty += 6;
 
-    fb_text_center(SCREEN_H - 16, "< LEFT/RIGHT >   A: START", PAL_GRAY);
+    /* Year */
+    if (rom_meta[selected].year[0]) {
+        char line[48];
+        snprintf(line, sizeof(line), "YEAR: %s", rom_meta[selected].year);
+        fb_text(text_x, ty, line, PAL_GRAY);
+        ty += 12;
+    }
+
+    /* Players */
+    if (rom_meta[selected].players[0]) {
+        char line[48];
+        snprintf(line, sizeof(line), "PLAYERS: %s", rom_meta[selected].players);
+        fb_text(text_x, ty, line, PAL_GRAY);
+        ty += 12;
+    }
+
+    /* Genre */
+    if (rom_meta[selected].genre[0]) {
+        char gline[48];
+        int glen = (int)strlen(rom_meta[selected].genre);
+        int gmax = text_w / 6;
+        if (gmax > 47) gmax = 47;
+        if (glen > gmax) {
+            memcpy(gline, rom_meta[selected].genre, gmax - 3);
+            gline[gmax - 3] = '.'; gline[gmax - 2] = '.'; gline[gmax - 1] = '.';
+            gline[gmax] = '\0';
+        } else {
+            strncpy(gline, rom_meta[selected].genre, 47);
+            gline[47] = '\0';
+        }
+        fb_text(text_x, ty, gline, PAL_GRAY);
+        ty += 12;
+    }
+
+    /* Description */
+    if (rom_meta[selected].desc[0]) {
+        ty += 4;
+        int max_desc_lines = (CART_Y + CART_H - ty) / 9;
+        if (max_desc_lines > 14) max_desc_lines = 14;
+        if (max_desc_lines > 0)
+            fb_text_wrap(text_x, ty, text_w, rom_meta[selected].desc, PAL_GRAY, max_desc_lines);
+    }
+}
+
+static void draw_selector_text(int selected) {
+    bool info_visible = (info_state == INFO_SHOWN || info_state == INFO_SLIDING_IN
+                         || info_state == INFO_SLIDING_OUT);
+
+    if (!info_visible) {
+        const char *title = rom_meta[selected].title[0] ? rom_meta[selected].title : rom_list[selected].filename;
+        char dt[40];
+        int max_c = (SCREEN_W - 20) / 6;
+        if (max_c > 39) max_c = 39;
+        int tlen = (int)strlen(title);
+        if (tlen > max_c) {
+            int cut = max_c > 3 ? max_c - 3 : 0;
+            memcpy(dt, title, cut);
+            dt[cut] = '.'; dt[cut+1] = '.'; dt[cut+2] = '.'; dt[cut+3] = '\0';
+        } else {
+            memcpy(dt, title, tlen); dt[tlen] = '\0';
+        }
+        fb_text_center(CART_Y + CART_H + 16, dt, PAL_WHITE);
+
+        char counter[16];
+        snprintf(counter, sizeof(counter), "%d / %d", selected + 1, rom_count);
+        fb_text_center(CART_Y + CART_H + 30, counter, PAL_GRAY);
+    }
+
+    /* Hint text */
+    if (info_state == INFO_SHOWN)
+        fb_text_center(SCREEN_H - 16, "< DOWN >   A: START", PAL_GRAY);
+    else if (info_state == INFO_HIDDEN)
+        fb_text_center(SCREEN_H - 16, "< LEFT/RIGHT/UP >   A: START", PAL_GRAY);
 }
 
 /* ─── Animation ───────────────────────────────────────────────────── */
@@ -643,6 +852,12 @@ static void draw_scene(int selected, int bounce_idx) {
 
         draw_cart_at(out_x, CART_Y, scroll_from);
         draw_cart_at(in_x, CART_Y, selected);
+    } else if (info_state != INFO_HIDDEN) {
+        /* Info panel: cart slides to the left, no bounce */
+        int cx = info_cart_x();
+        draw_cart_at(cx, CART_Y, selected);
+        if (info_state == INFO_SHOWN)
+            draw_info_panel(selected);
     } else {
         /* Idle: gentle float */
         int by = bounce_offset(bounce_idx);
@@ -658,6 +873,8 @@ static void draw_scene(int selected, int bounce_idx) {
 #define BTN_RIGHT 0x02
 #define BTN_A     0x04
 #define BTN_START 0x08
+#define BTN_UP    0x10
+#define BTN_DOWN  0x20
 
 static int read_selector_buttons(void) {
     nespad_read();
@@ -666,6 +883,8 @@ static int read_selector_buttons(void) {
     uint32_t pad = nespad_state | nespad_state2;
     if (pad & DPAD_LEFT)  buttons |= BTN_LEFT;
     if (pad & DPAD_RIGHT) buttons |= BTN_RIGHT;
+    if (pad & DPAD_UP)    buttons |= BTN_UP;
+    if (pad & DPAD_DOWN)  buttons |= BTN_DOWN;
     if (pad & DPAD_A)     buttons |= BTN_A;
     if (pad & DPAD_START) buttons |= BTN_START;
     uint16_t kbd = ps2kbd_get_state();
@@ -674,12 +893,16 @@ static int read_selector_buttons(void) {
 #endif
     if (kbd & KBD_STATE_LEFT)  buttons |= BTN_LEFT;
     if (kbd & KBD_STATE_RIGHT) buttons |= BTN_RIGHT;
+    if (kbd & KBD_STATE_UP)    buttons |= BTN_UP;
+    if (kbd & KBD_STATE_DOWN)  buttons |= BTN_DOWN;
     if (kbd & KBD_STATE_A)     buttons |= BTN_A;
     if (kbd & KBD_STATE_START) buttons |= BTN_START;
 #ifdef USB_HID_ENABLED
     if (usbhid_gamepad_connected()) {
         usbhid_gamepad_state_t gp;
         usbhid_get_gamepad_state(&gp);
+        if (gp.dpad & 0x01) buttons |= BTN_UP;
+        if (gp.dpad & 0x02) buttons |= BTN_DOWN;
         if (gp.dpad & 0x04) buttons |= BTN_LEFT;
         if (gp.dpad & 0x08) buttons |= BTN_RIGHT;
         if (gp.buttons & 0x01) buttons |= BTN_A;
@@ -784,6 +1007,8 @@ bool rom_selector_show(long *out_rom_size) {
     cur_img_idx = -1;
     scroll_dir = 0;
     scroll_frame = 0;
+    info_state = INFO_HIDDEN;
+    info_anim_frame = 0;
 
     /* Load cover art for the initial selection */
     if (sd_ok) load_rom_image(selected);
@@ -813,6 +1038,21 @@ bool rom_selector_show(long *out_rom_size) {
             }
         }
 
+        /* Advance info panel animation */
+        if (info_state == INFO_SLIDING_IN) {
+            info_anim_frame++;
+            if (info_anim_frame >= INFO_ANIM_FRAMES) {
+                info_state = INFO_SHOWN;
+                info_anim_frame = 0;
+            }
+        } else if (info_state == INFO_SLIDING_OUT) {
+            info_anim_frame++;
+            if (info_anim_frame >= INFO_ANIM_FRAMES) {
+                info_state = INFO_HIDDEN;
+                info_anim_frame = 0;
+            }
+        }
+
         /* Input happens after posting */
         int buttons = read_selector_buttons();
         int pressed = buttons & ~prev_buttons;
@@ -825,8 +1065,20 @@ bool rom_selector_show(long *out_rom_size) {
         }
         prev_buttons = buttons;
 
-        /* Only accept new navigation when not mid-scroll */
-        if (scroll_dir == 0) {
+        /* Info panel: UP opens, DOWN closes */
+        if (info_state == INFO_HIDDEN && scroll_dir == 0 && (pressed & BTN_UP)) {
+            info_state = INFO_SLIDING_IN;
+            info_anim_frame = 0;
+        }
+        if ((info_state == INFO_SHOWN) && (pressed & BTN_DOWN)) {
+            info_state = INFO_SLIDING_OUT;
+            info_anim_frame = 0;
+        }
+
+        /* Only accept navigation/selection when info is hidden and not mid-scroll */
+        bool can_navigate = (scroll_dir == 0 && info_state == INFO_HIDDEN);
+
+        if (can_navigate) {
             if (pressed & BTN_LEFT) {
                 scroll_from = selected;
                 selected = (selected - 1 + rom_count) % rom_count;
@@ -841,60 +1093,81 @@ bool rom_selector_show(long *out_rom_size) {
                 scroll_frame = 0;
                 if (sd_ok) load_rom_image(selected);
             }
+        }
 
-            if (pressed & (BTN_A | BTN_START)) {
-                /* Load ROM from SD into PSRAM on demand */
-                long loaded_size = 0;
-                if (sd_ok) {
-                    char rpath[ROM_PATH_MAX];
-                    snprintf(rpath, sizeof(rpath), "/nes/%s",
-                             rom_list[selected].filename);
-                    FIL rfil;
-                    if (f_open(&rfil, rpath, FA_READ) == FR_OK) {
-                        FSIZE_t rfsz = f_size(&rfil);
-                        if (rfsz >= 16 && rfsz <= ROM_PSRAM_MAX) {
-                            /* Write via uncached PSRAM alias (0x15xxxxxx) so
-                             * the XIP cache stays full of Core 1's flash code
-                             * and HDMI output is not disrupted. */
-                            uint8_t *dst = (uint8_t *)0x15000000;
-                            UINT rbr;
-                            if (f_read(&rfil, dst, (UINT)rfsz, &rbr) == FR_OK
-                                && rbr == (UINT)rfsz) {
-                                loaded_size = (long)rfsz;
-                            }
-                        }
-                        f_close(&rfil);
+        if (pressed & (BTN_A | BTN_START)) {
+            /* If info panel is open, close it first before starting */
+            if (info_state != INFO_HIDDEN) {
+                info_state = INFO_SLIDING_OUT;
+                info_anim_frame = 0;
+                /* Animate the slide-out, then proceed to load */
+                while (info_state == INFO_SLIDING_OUT) {
+                    selector_wait_vsync();
+                    draw_scene(selected, frame_count);
+                    uint8_t *tmp2 = fb; fb = fb_show; fb_show = tmp2;
+                    audio_fill_silence(SAMPLE_RATE / 60);
+                    pending_pitch = SCREEN_W;
+                    pending_pixels = fb_show;
+                    frame_count++;
+                    info_anim_frame++;
+                    if (info_anim_frame >= INFO_ANIM_FRAMES) {
+                        info_state = INFO_HIDDEN;
+                        info_anim_frame = 0;
                     }
                 }
-                if (loaded_size <= 0) {
-                    printf("Selected: %s — load FAILED\n",
-                           rom_list[selected].filename);
-                    fb_fill(PAL_BG);
-                    fb_text_center(SCREEN_H / 2 - 4, "ROM FAILED TO LOAD", PAL_WHITE);
-                    fb_text_center(SCREEN_H / 2 + 10, "CHECK FILE ON SD CARD", PAL_GRAY);
-                    uint8_t *tmp2 = fb; fb = fb_show; fb_show = tmp2;
+            }
+
+            /* Wait for any scroll to finish too */
+            if (scroll_dir != 0) continue;
+
+            /* Load ROM from SD into PSRAM on demand */
+            long loaded_size = 0;
+            if (sd_ok) {
+                char rpath[ROM_PATH_MAX];
+                snprintf(rpath, sizeof(rpath), "/nes/%s",
+                         rom_list[selected].filename);
+                FIL rfil;
+                if (f_open(&rfil, rpath, FA_READ) == FR_OK) {
+                    FSIZE_t rfsz = f_size(&rfil);
+                    if (rfsz >= 16 && rfsz <= ROM_PSRAM_MAX) {
+                        uint8_t *dst = (uint8_t *)0x15000000;
+                        UINT rbr;
+                        if (f_read(&rfil, dst, (UINT)rfsz, &rbr) == FR_OK
+                            && rbr == (UINT)rfsz) {
+                            loaded_size = (long)rfsz;
+                        }
+                    }
+                    f_close(&rfil);
+                }
+            }
+            if (loaded_size <= 0) {
+                printf("Selected: %s — load FAILED\n",
+                       rom_list[selected].filename);
+                fb_fill(PAL_BG);
+                fb_text_center(SCREEN_H / 2 - 4, "ROM FAILED TO LOAD", PAL_WHITE);
+                fb_text_center(SCREEN_H / 2 + 10, "CHECK FILE ON SD CARD", PAL_GRAY);
+                uint8_t *tmp2 = fb; fb = fb_show; fb_show = tmp2;
+                selector_wait_vsync();
+                audio_fill_silence(SAMPLE_RATE / 60);
+                pending_pitch = SCREEN_W;
+                pending_pixels = fb_show;
+                for (int i = 0; i < 120; i++) {
                     selector_wait_vsync();
                     audio_fill_silence(SAMPLE_RATE / 60);
                     pending_pitch = SCREEN_W;
                     pending_pixels = fb_show;
-                    for (int i = 0; i < 120; i++) {
-                        selector_wait_vsync();
-                        audio_fill_silence(SAMPLE_RATE / 60);
-                        pending_pitch = SCREEN_W;
-                        pending_pixels = fb_show;
-                    }
-                    continue;
                 }
-                selected_rom_idx = selected;
-                last_selected_rom = selected;
-                set_rom_name(rom_list[selected].filename);
-                *out_rom_size = loaded_size;
-                printf("Selected: %s (%ld bytes)\n",
-                       rom_list[selected].filename, loaded_size);
-                save_last_rom(selected);
-                f_unmount("");
-                return true;
+                continue;
             }
+            selected_rom_idx = selected;
+            last_selected_rom = selected;
+            set_rom_name(rom_list[selected].filename);
+            *out_rom_size = loaded_size;
+            printf("Selected: %s (%ld bytes)\n",
+                   rom_list[selected].filename, loaded_size);
+            save_last_rom(selected);
+            f_unmount("");
+            return true;
         }
     }
 }
