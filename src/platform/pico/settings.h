@@ -56,6 +56,9 @@ void settings_load(void);
  */
 void settings_save(void);
 
+/* Current ROM name (no path/extension) — set by main_pico.c during ROM load */
+extern char g_rom_name[64];
+
 /**
  * Check if menu hotkey is pressed (Start+Select, ESC, or F12)
  * Call this during the emulation loop.

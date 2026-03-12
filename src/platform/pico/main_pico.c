@@ -355,6 +355,9 @@ static bool try_init_psram(void)
  * Caller may free the buffer after qnes_load_rom() since QuickNES copies it. */
 static uint8_t *sd_rom_buf = NULL;
 
+/* Current ROM filename (without path/extension) for save state naming */
+char g_rom_name[64] = {0};
+
 static uint8_t *try_load_rom_from_sd(long *out_size)
 {
     *out_size = 0;
@@ -389,6 +392,13 @@ static uint8_t *try_load_rom_from_sd(long *out_size)
             (fno.fname[len-2] == 'e' || fno.fname[len-2] == 'E') &&
             (fno.fname[len-1] == 's' || fno.fname[len-1] == 'S')) {
             snprintf(filepath, sizeof(filepath), "/nes/%s", fno.fname);
+            /* Store ROM name (without extension) for save state naming */
+            {
+                size_t nlen = len >= 4 ? len - 4 : len;
+                if (nlen >= sizeof(g_rom_name)) nlen = sizeof(g_rom_name) - 1;
+                memcpy(g_rom_name, fno.fname, nlen);
+                g_rom_name[nlen] = '\0';
+            }
             found = true;
             printf("SD: found ROM: %s (%lu bytes)\n", filepath, (unsigned long)fno.fsize);
             break;
@@ -658,6 +668,8 @@ static void real_main(void)
         if (qnes_load_rom_inplace(nes_rom_data, rom_size) == 0) {
             printf("Flash ROM loaded OK\n");
             rom_loaded = true;
+            if (g_rom_name[0] == '\0')
+                snprintf(g_rom_name, sizeof(g_rom_name), "flash_rom");
         } else {
             printf("qnes_load_rom_inplace (flash) FAILED\n");
         }

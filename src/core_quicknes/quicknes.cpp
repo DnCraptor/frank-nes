@@ -7,8 +7,12 @@
 
 #include "quicknes.h"
 #include "nes_emu.h"
+#include "nes_state.h"
 #include "data_reader.h"
+#include "abstract_file.h"
+#include "ff.h"
 #include <stdio.h>
+#include <string.h>
 
 /* Emulator allocated on demand — avoids global C++ constructor running before main() */
 static Nes_Emu *emu;
@@ -147,6 +151,72 @@ long qnes_read_samples(int16_t *out, long max_samples)
         return 0;
 
     return emu->read_samples(out, max_samples);
+}
+
+/* FatFS-backed Data_Writer: streams directly to an open file (no malloc) */
+class FatFS_Writer : public Data_Writer {
+    FIL *fil;
+public:
+    FatFS_Writer(FIL *f) : fil(f) {}
+    const char *write(const void *p, long n) {
+        UINT bw;
+        FRESULT fr = f_write(fil, p, (UINT)n, &bw);
+        if (fr != FR_OK || bw != (UINT)n) return "SD write error";
+        return 0;
+    }
+};
+
+/* FatFS-backed Data_Reader: streams directly from an open file (no malloc) */
+class FatFS_Reader : public Data_Reader {
+    FIL *fil;
+public:
+    FatFS_Reader(FIL *f, long size) : fil(f) { set_remain(size); }
+    const char *read_v(void *p, int n) {
+        UINT br;
+        FRESULT fr = f_read(fil, p, (UINT)n, &br);
+        if (fr != FR_OK || br != (UINT)n) return "SD read error";
+        return 0;
+    }
+    const char *skip_v(int n) {
+        FRESULT fr = f_lseek(fil, f_tell(fil) + n);
+        if (fr != FR_OK) return "SD seek error";
+        return 0;
+    }
+};
+
+/* Static Nes_State to avoid ~25KB stack allocation */
+static Nes_State save_load_state;
+
+int qnes_save_state(qnes_file_t file)
+{
+    if (!rom_loaded) return -1;
+
+    emu->save_state(&save_load_state);
+
+    FatFS_Writer writer((FIL *)file);
+    const char *err = save_load_state.write(Auto_File_Writer(writer));
+    if (err) {
+        printf("qnes_save_state: %s\n", err);
+        return -1;
+    }
+    return 0;
+}
+
+int qnes_load_state(qnes_file_t file, long file_size)
+{
+    if (!rom_loaded) return -1;
+
+    FatFS_Reader reader((FIL *)file, file_size);
+    Auto_File_Reader in(reader);
+
+    const char *err = save_load_state.read(in);
+    if (err) {
+        printf("qnes_load_state: %s\n", err);
+        return -1;
+    }
+
+    emu->load_state(save_load_state);
+    return 0;
 }
 
 void qnes_reset(int full_reset)

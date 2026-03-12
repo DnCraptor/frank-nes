@@ -58,6 +58,18 @@ long qnes_read_samples(int16_t *out, long max_samples);
  * Must be called before qnes_load_rom*. NULL to use heap (default). */
 void qnes_set_tile_cache_buf(void *buf, long size);
 
+/* Opaque file handle for save state I/O (cast to FIL* from ff.h) */
+typedef void *qnes_file_t;
+
+/* Save emulator state directly to an open file.
+ * Returns 0 on success, non-zero on error. */
+int qnes_save_state(qnes_file_t file);
+
+/* Load emulator state directly from an open file.
+ * file_size: total bytes in the file.
+ * Returns 0 on success, non-zero on error. */
+int qnes_load_state(qnes_file_t file, long file_size);
+
 /* Reset emulator. full_reset=1 for power cycle, 0 for reset button. */
 void qnes_reset(int full_reset);
 

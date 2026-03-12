@@ -7,6 +7,7 @@
  */
 
 #include "settings.h"
+#include "quicknes.h"
 #include "pico/stdlib.h"
 #include "nespad.h"
 #include "ps2kbd_wrapper.h"
@@ -59,9 +60,19 @@ typedef enum {
     MENU_AUDIO,
     MENU_VOLUME,
     MENU_SEPARATOR2,
+    MENU_SAVE_GAME,
+    MENU_LOAD_GAME,
+    MENU_SEPARATOR3,
     MENU_EXIT,
     MENU_ITEM_COUNT
 } menu_item_t;
+
+/* Whether a save file exists for the current ROM */
+static bool save_exists = false;
+
+/* Temporary status message shown after save/load (countdown in frames) */
+static const char *status_msg = NULL;
+static int status_frames = 0;
 
 /* Input mode names */
 static const char *input_mode_names[] = {"ANY", "NES GAMEPAD 1", "NES GAMEPAD 2", "USB GAMEPAD 1", "USB GAMEPAD 2", "KEYBOARD", "DISABLED"};
@@ -241,13 +252,19 @@ static const char *get_menu_label(menu_item_t item) {
         case MENU_PLAYER2:   return "PLAYER 2";
         case MENU_AUDIO:     return "AUDIO";
         case MENU_VOLUME:    return "VOLUME";
+        case MENU_SAVE_GAME: return (status_frames > 0) ? status_msg : "SAVE GAME";
+        case MENU_LOAD_GAME: return save_exists ? "LOAD GAME" : "LOAD GAME (-)";
         case MENU_EXIT:      return "EXIT";
         default:             return "";
     }
 }
 
 static bool is_selectable(menu_item_t item) {
-    return item != MENU_SEPARATOR1 && item != MENU_SEPARATOR2;
+    if (item == MENU_SEPARATOR1 || item == MENU_SEPARATOR2 || item == MENU_SEPARATOR3)
+        return false;
+    if (item == MENU_LOAD_GAME && !save_exists)
+        return false;
+    return true;
 }
 
 static int next_selectable(int sel, int dir) {
@@ -356,13 +373,17 @@ static void draw_settings_menu(uint8_t *screen, int selected) {
     for (int i = 0; i < MENU_ITEM_COUNT; i++) {
         menu_item_t item = (menu_item_t)i;
 
-        if (item == MENU_SEPARATOR1 || item == MENU_SEPARATOR2) {
+        if (item == MENU_SEPARATOR1 || item == MENU_SEPARATOR2 || item == MENU_SEPARATOR3) {
             draw_hline(screen, MENU_X, y + LINE_HEIGHT / 2, SCREEN_WIDTH - 2 * MENU_X, PAL_GRAY);
             y += LINE_HEIGHT;
             continue;
         }
 
-        uint8_t color = (i == selected) ? PAL_YELLOW : PAL_WHITE;
+        uint8_t color;
+        if (item == MENU_LOAD_GAME && !save_exists)
+            color = PAL_GRAY;
+        else
+            color = (i == selected) ? PAL_YELLOW : PAL_WHITE;
 
         /* Selection indicator */
         if (i == selected) {
@@ -479,6 +500,104 @@ static int read_menu_buttons(void) {
 #endif
 
     return buttons;
+}
+
+/* ─── Save state (SD card) ────────────────────────────────────────── */
+
+static void get_save_path(char *path, size_t path_size) {
+    snprintf(path, path_size, "/nes/.save/%s.sav", g_rom_name);
+}
+
+static bool check_save_exists(void) {
+    if (g_rom_name[0] == '\0') {
+        printf("check_save: no rom name\n");
+        return false;
+    }
+
+    char path[128];
+    get_save_path(path, sizeof(path));
+    printf("check_save: path=%s\n", path);
+
+    static FATFS check_fs;
+    FRESULT fr = f_mount(&check_fs, "", 1);
+    if (fr != FR_OK) {
+        printf("check_save: mount failed (%d)\n", fr);
+        return false;
+    }
+
+    FILINFO fno;
+    bool exists = (f_stat(path, &fno) == FR_OK);
+    f_unmount("");
+    printf("check_save: exists=%d\n", exists);
+    return exists;
+}
+
+static const char *save_error = NULL;
+
+static bool do_save_game(void) {
+    static FATFS save_fs;
+    save_error = NULL;
+
+    printf("do_save: rom_name='%s'\n", g_rom_name);
+    if (g_rom_name[0] == '\0') { save_error = "NO ROM NAME"; return false; }
+
+    FRESULT fr = f_mount(&save_fs, "", 1);
+    printf("do_save: f_mount=%d\n", fr);
+    if (fr != FR_OK) { save_error = "SD MOUNT FAIL"; return false; }
+
+    f_mkdir("/nes");
+    f_mkdir("/nes/.save");
+
+    char path[128];
+    get_save_path(path, sizeof(path));
+    printf("do_save: saving to %s\n", path);
+
+    FIL file;
+    FRESULT fro = f_open(&file, path, FA_WRITE | FA_CREATE_ALWAYS);
+    printf("do_save: f_open=%d\n", fro);
+    if (fro != FR_OK) {
+        f_unmount("");
+        save_error = "FILE OPEN FAIL";
+        return false;
+    }
+
+    /* Stream state directly to file — no intermediate buffer */
+    int ret = qnes_save_state(&file);
+    printf("do_save: qnes_save_state=%d\n", ret);
+    f_close(&file);
+    f_unmount("");
+
+    if (ret != 0) { save_error = "STATE FAILED"; return false; }
+
+    printf("do_save: OK\n");
+    return true;
+}
+
+static bool do_load_game(void) {
+    if (g_rom_name[0] == '\0') return false;
+
+    static FATFS load_fs;
+    if (f_mount(&load_fs, "", 1) != FR_OK) return false;
+
+    char path[128];
+    get_save_path(path, sizeof(path));
+    printf("do_load: loading from %s\n", path);
+
+    FIL file;
+    if (f_open(&file, path, FA_READ) != FR_OK) {
+        f_unmount("");
+        return false;
+    }
+
+    long fsize = (long)f_size(&file);
+
+    /* Stream state directly from file — no intermediate buffer */
+    int ret = qnes_load_state(&file, fsize);
+    printf("do_load: qnes_load_state=%d\n", ret);
+    f_close(&file);
+    f_unmount("");
+
+    return ret == 0;
 }
 
 /* ─── Settings persistence (SD card) ──────────────────────────────── */
@@ -631,6 +750,10 @@ settings_result_t settings_menu_show(uint8_t *screen_buffer) {
     /* Copy current settings for editing */
     edit_settings = g_settings;
 
+    /* Check if a save file exists for this ROM */
+    save_exists = check_save_exists();
+    status_frames = 0;
+
     /* Set up menu palette */
     setup_menu_palette();
 
@@ -693,6 +816,23 @@ settings_result_t settings_menu_show(uint8_t *screen_buffer) {
                 settings_save();
                 break;
             }
+            if (selected == MENU_SAVE_GAME) {
+                bool ok = do_save_game();
+                if (ok) {
+                    save_exists = true;
+                    status_msg = "SAVED.";
+                } else {
+                    status_msg = save_error ? save_error : "SAVE FAILED.";
+                }
+                status_frames = 120;
+                continue;
+            }
+            if (selected == MENU_LOAD_GAME && save_exists) {
+                do_load_game();
+                g_settings = edit_settings;
+                settings_save();
+                break;  /* exit menu after loading state */
+            }
             /* For value items, A/Start cycles forward */
             change_value((menu_item_t)selected, 1);
         }
@@ -703,6 +843,9 @@ settings_result_t settings_menu_show(uint8_t *screen_buffer) {
             settings_save();
             break;
         }
+
+        /* Tick status message countdown */
+        if (status_frames > 0) status_frames--;
 
         /* Draw and display */
         draw_settings_menu(screen_buffer, selected);

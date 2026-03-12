@@ -93,6 +93,7 @@ target_include_directories(murmnes PRIVATE
     ${DRIVERSDIR}
     ${DRIVERSDIR}/psram
     ${DRIVERSDIR}/i2s
+    ${SRCDIR}/lib/fatfs
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -137,11 +138,9 @@ target_link_libraries(murmnes
 
 if(USB_HID_ENABLED)
     target_link_libraries(murmnes usbhid)
-    pico_enable_stdio_usb(murmnes 0)
-else()
-    pico_enable_stdio_usb(murmnes 1)
 endif()
-pico_enable_stdio_uart(murmnes 0)
+pico_enable_stdio_usb(murmnes 0)
+pico_enable_stdio_uart(murmnes 1)
 
 # Optional: embed NES ROM into flash
 if(DEFINED NES_ROM_PATH)
