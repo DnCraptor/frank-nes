@@ -814,18 +814,39 @@ bool rom_selector_show(long *out_rom_size) {
                     FIL rfil;
                     if (f_open(&rfil, rpath, FA_READ) == FR_OK) {
                         FSIZE_t rfsz = f_size(&rfil);
-                        if (rfsz >= 16 && rfsz <= ROM_PSRAM_MAX) {
-                            uint8_t *dst = (uint8_t *)ROM_PSRAM_BASE;
+                        uint32_t aligned_sz = ((uint32_t)rfsz + 3) & ~3;
+                        /* Pick write offset: append after preloaded data if
+                         * possible, otherwise reuse PSRAM from offset 0 and
+                         * invalidate any preloaded ROMs we overwrite. */
+                        uint32_t wr_off = rom_data_offset;
+                        if (rfsz < 16 || rfsz > ROM_PSRAM_MAX) {
+                            /* Invalid size — skip */
+                        } else {
+                            if (wr_off + rfsz > ROM_PSRAM_MAX) {
+                                wr_off = 0;  /* wrap to start */
+                            }
+                            uint8_t *dst = (uint8_t *)(ROM_PSRAM_BASE + wr_off);
                             UINT rbr;
                             if (f_read(&rfil, dst, (UINT)rfsz, &rbr) == FR_OK
                                 && rbr == (UINT)rfsz) {
-                                /* Flush dirty cache lines to PSRAM so the data
-                                 * survives xip_cache_invalidate_all() later. */
                                 xip_cache_clean_all();
-                                rom_list[selected].rom_psram_offset = 0;
+                                /* Invalidate preloaded ROMs whose data overlaps */
+                                uint32_t wr_end = wr_off + aligned_sz;
+                                for (int j = 0; j < rom_count; j++) {
+                                    if (j == selected || rom_list[j].rom_size <= 0)
+                                        continue;
+                                    uint32_t ro = rom_list[j].rom_psram_offset;
+                                    uint32_t re = ro + (uint32_t)rom_list[j].rom_size;
+                                    if (ro < wr_end && re > wr_off)
+                                        rom_list[j].rom_size = 0;
+                                }
+                                rom_list[selected].rom_psram_offset = wr_off;
                                 rom_list[selected].rom_size = (long)rfsz;
-                                printf("ROM '%s' loaded on-demand (%lu bytes)\n",
+                                if (wr_off + aligned_sz > rom_data_offset)
+                                    rom_data_offset = wr_off + aligned_sz;
+                                printf("ROM '%s' loaded on-demand at +%lu (%lu bytes)\n",
                                        rom_list[selected].filename,
+                                       (unsigned long)wr_off,
                                        (unsigned long)rfsz);
                             }
                         }
