@@ -4,6 +4,12 @@ NES (Nintendo Entertainment System) emulator for Raspberry Pi Pico 2 (RP2350) wi
 
 Based on [QuickNES](https://github.com/libretro/QuickNES_Core) by Shay Green (blargg).
 
+## Screenshots
+
+| ROM Selector | Gameplay | Settings |
+|:---:|:---:|:---:|
+| ![ROM Selector](screenshots/screen1.png) | ![Gameplay](screenshots/screen2.png) | ![Settings](screenshots/screen3.png) |
+
 ## Supported Board
 
 This firmware is designed for the **M2** board layout on RP2350-based boards with integrated HDMI, SD card, and PSRAM:
