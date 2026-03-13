@@ -1,7 +1,7 @@
 /*
  * NES/SNES gamepad driver via PIO
- * Based on pico-infonesPlus by shuichi
- * https://github.com/shuichi/pico-infonesPlus
+ * Based on pico-infonesPlus by shuichitakano and fhoedemakers
+ * https://github.com/fhoedemakers/pico-infonesPlus
  * SPDX-License-Identifier: MIT
  *
  * Fork maintained as part of MurmNES by Mikhail Matveev.
