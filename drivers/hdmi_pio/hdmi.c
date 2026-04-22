@@ -7,6 +7,7 @@
  * palette-indexed framebuffer to TMDS conversion. It runs entirely
  * from DMA interrupts - no Core 1 needed for video.
  */
+#include "../../src/platform/pico/board_config.h"
 
 #include "hdmi.h"
 #include <stdio.h>

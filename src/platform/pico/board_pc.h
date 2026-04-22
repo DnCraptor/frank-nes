@@ -35,14 +35,15 @@
 /* No TV/VGA */
 
 /* PSRAM on GP8 only */
-#define PSRAM_CS_PIN_RP2350B 8
+#define PSRAM_CS_PIN_RP2350B 47
 #define PSRAM_CS_PIN_RP2350A 8
 
 /* No UART logging (GPIO 0 is KBD) */
 #define NO_UART_LOGGING 1
 
 /* Video: HSTX only (GPIO 12-19) */
-#define HAS_HSTX 1
+//#define HAS_HSTX 1
 #define HDMI_BASE_PIN 12
+#define VGA_BASE_PIN  12
 
 #endif /* BOARD_PC_H */
