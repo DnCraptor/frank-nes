@@ -1251,10 +1251,17 @@ static void fb_draw_browser(const char *path, int selected, int scroll) {
 
 static int search_dialog_show(void);
 
-/* Persistent file browser state across calls (Issue 2) */
+/* Persistent file browser state across calls */
 static char fb_persist_path[ROM_PATH_MAX];
 static int  fb_persist_selected = 0;
 static int  fb_persist_scroll = 0;
+
+static void fb_save_path(const char *path) {
+    strncpy(fb_persist_path, path, sizeof(fb_persist_path) - 1);
+    fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+    strncpy(g_settings.browser_path, path, sizeof(g_settings.browser_path) - 1);
+    g_settings.browser_path[sizeof(g_settings.browser_path) - 1] = '\0';
+}
 static bool fb_persist_valid = false;
 
 static bool file_browser_show(long *out_rom_size) {
@@ -1270,27 +1277,64 @@ static bool file_browser_show(long *out_rom_size) {
     if (!sd_ok) return false;
 
     char cur_path[ROM_PATH_MAX];
-    if (fb_persist_valid) {
-        strncpy(cur_path, fb_persist_path, sizeof(cur_path) - 1);
-        cur_path[sizeof(cur_path) - 1] = '\0';
-    } else {
+    bool persist_usable = false;
+
+    bool cold_boot_restore = false;
+
+    printf("FB: persist_valid=%d browser_path='%s' browser_file='%s'\n",
+           fb_persist_valid, g_settings.browser_path, g_settings.browser_file);
+
+    /* Seed from SD-saved path on first call (cold boot) */
+    if (!fb_persist_valid && g_settings.browser_path[0] != '\0') {
+        DIR check_dir;
+        if (f_opendir(&check_dir, g_settings.browser_path) == FR_OK) {
+            f_closedir(&check_dir);
+            strncpy(cur_path, g_settings.browser_path, sizeof(cur_path) - 1);
+            cur_path[sizeof(cur_path) - 1] = '\0';
+            cold_boot_restore = true;
+            persist_usable = true;
+        }
+    }
+
+    if (!persist_usable && fb_persist_valid) {
+        DIR check_dir;
+        if (f_opendir(&check_dir, fb_persist_path) == FR_OK) {
+            f_closedir(&check_dir);
+            strncpy(cur_path, fb_persist_path, sizeof(cur_path) - 1);
+            cur_path[sizeof(cur_path) - 1] = '\0';
+            persist_usable = true;
+        } else {
+            fb_persist_valid = false;
+        }
+    }
+    if (!persist_usable) {
         strcpy(cur_path, "/nes");
     }
     fb_scan_dir(cur_path);
 
-    int selected, scroll;
-    if (fb_persist_valid) {
+    int selected = 0, scroll = 0;
+    printf("FB: cold_boot=%d persist_usable=%d entries=%d\n", cold_boot_restore, persist_usable, fb_entry_count);
+    if (cold_boot_restore && g_settings.browser_file[0] != '\0') {
+        /* Cold boot: find last launched file in the directory listing */
+        for (int i = 0; i < fb_entry_count; i++) {
+            if (strcmp(fb_entries[i].name, g_settings.browser_file) == 0) {
+                selected = i;
+                printf("FB: found '%s' at index %d\n", g_settings.browser_file, i);
+                break;
+            }
+        }
+        scroll = selected - FB_VISIBLE_LINES / 2;
+        if (scroll < 0) scroll = 0;
+        if (fb_entry_count > FB_VISIBLE_LINES && scroll > fb_entry_count - FB_VISIBLE_LINES)
+            scroll = fb_entry_count - FB_VISIBLE_LINES;
+    } else if (persist_usable && !cold_boot_restore) {
         selected = fb_persist_selected;
         scroll = fb_persist_scroll;
-        /* Clamp to current directory contents */
         if (selected >= fb_entry_count) selected = fb_entry_count > 0 ? fb_entry_count - 1 : 0;
         if (scroll > selected) scroll = selected;
         if (fb_entry_count > FB_VISIBLE_LINES && scroll > fb_entry_count - FB_VISIBLE_LINES)
             scroll = fb_entry_count - FB_VISIBLE_LINES;
         if (scroll < 0) scroll = 0;
-    } else {
-        selected = 0;
-        scroll = 0;
     }
     fb_persist_valid = true;
 
@@ -1320,23 +1364,24 @@ static bool file_browser_show(long *out_rom_size) {
         }
         prev_buttons = buttons;
 
-        /* F11, ESC, B, or Select+Start: back to carousel */
-        if (pressed & (BTN_F11 | BTN_ESC | BTN_B)) {
-            g_settings.selector_mode = SELECTOR_MODE_CAROUSEL;
-            settings_save();
-            /* Save browser position for next time */
-            strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
-            fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
-            fb_persist_selected = selected;
-            fb_persist_scroll = scroll;
-            break;
-        }
+        /* Select+Start: back to carousel (must be checked FIRST so the
+         * ROM selector handles the combo itself and it never leaks to
+         * the settings hotkey during gameplay transitions). */
         if (((pressed & BTN_SELECT) && (buttons & BTN_START)) ||
             ((pressed & BTN_START) && (buttons & BTN_SELECT))) {
             g_settings.selector_mode = SELECTOR_MODE_CAROUSEL;
             settings_save();
-            strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
-            fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+            fb_save_path(cur_path);
+            fb_persist_selected = selected;
+            fb_persist_scroll = scroll;
+            break;
+        }
+        /* F11, ESC, B: back to carousel */
+        if (pressed & (BTN_F11 | BTN_ESC | BTN_B)) {
+            g_settings.selector_mode = SELECTOR_MODE_CAROUSEL;
+            settings_save();
+            /* Save browser position for next time */
+            fb_save_path(cur_path);
             fb_persist_selected = selected;
             fb_persist_scroll = scroll;
             break;
@@ -1351,8 +1396,7 @@ static bool file_browser_show(long *out_rom_size) {
                 g_settings.selector_mode = SELECTOR_MODE_CAROUSEL;
                 settings_save();
                 /* Save browser position */
-                strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
-                fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+                fb_save_path(cur_path);
                 fb_persist_selected = selected;
                 fb_persist_scroll = scroll;
                 f_unmount("");
@@ -1368,9 +1412,11 @@ static bool file_browser_show(long *out_rom_size) {
         /* Navigation */
         if (pressed & BTN_UP) {
             if (selected > 0) selected--;
+            else selected = fb_entry_count - 1;
         }
         if (pressed & BTN_DOWN) {
             if (selected < fb_entry_count - 1) selected++;
+            else selected = 0;
         }
         if (pressed & (BTN_PGUP | BTN_LEFT)) {
             selected -= FB_VISIBLE_LINES;
@@ -1440,12 +1486,24 @@ static bool file_browser_show(long *out_rom_size) {
                 if (loaded_size > 0) {
                     set_rom_name(e->name);
                     *out_rom_size = loaded_size;
+                    /* Save launched file for restoration on next boot */
+                    strncpy(g_settings.browser_file, e->name, sizeof(g_settings.browser_file) - 1);
+                    g_settings.browser_file[sizeof(g_settings.browser_file) - 1] = '\0';
                     /* Save browser position for when we return */
-                    strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
-                    fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+                    fb_save_path(cur_path);
                     fb_persist_selected = selected;
                     fb_persist_scroll = scroll;
                     f_unmount("");
+                    settings_save();
+                    /* Wait for buttons to be released so held Start/Select
+                     * doesn't trigger settings_check_hotkey() in gameplay. */
+                    for (int i = 0; i < 60; i++) {
+                        selector_wait_vsync();
+                        audio_fill_silence(SAMPLE_RATE / 60);
+                        pending_pitch = SCREEN_W;
+                        video_post_frame(fb_show, SCREEN_W);
+                        if (read_selector_buttons() == 0) break;
+                    }
                     return true;
                 }
             }
@@ -1453,12 +1511,12 @@ static bool file_browser_show(long *out_rom_size) {
     }
 
     /* Save browser position */
-    strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
-    fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+    fb_save_path(cur_path);
     fb_persist_selected = selected;
     fb_persist_scroll = scroll;
 
     f_unmount("");
+    settings_save();
     return false;
 }
 
@@ -1856,7 +1914,9 @@ bool rom_selector_show(long *out_rom_size) {
         }
         prev_buttons = buttons;
 
-        /* F11 or Select+Start: switch to file browser */
+        /* Select+Start: switch to file browser (must be checked BEFORE
+         * any settings hotkey so the ROM selector handles mode-switching
+         * itself and the combo never leaks to the settings menu). */
         bool sel_start = ((pressed & BTN_SELECT) && (buttons & BTN_START))
                       || ((pressed & BTN_START) && (buttons & BTN_SELECT));
         if ((pressed & BTN_F11) || sel_start) {
@@ -1997,6 +2057,16 @@ bool rom_selector_show(long *out_rom_size) {
                    rom_list[selected].filename, loaded_size);
             save_last_rom(selected);
             f_unmount("");
+            /* Wait for buttons to be released so held Start/Select
+             * doesn't immediately trigger settings_check_hotkey()
+             * when the gameplay loop begins. */
+            for (int i = 0; i < 60; i++) {
+                selector_wait_vsync();
+                audio_fill_silence(SAMPLE_RATE / 60);
+                pending_pitch = SCREEN_W;
+                video_post_frame(fb_show, SCREEN_W);
+                if (read_selector_buttons() == 0) break;
+            }
             return true;
         }
     }

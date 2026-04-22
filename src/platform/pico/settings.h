@@ -49,6 +49,8 @@ typedef struct {
     uint8_t volume;         // Master volume 0-100
     uint8_t selector_mode;  // ROM selector view (SELECTOR_MODE_*)
     uint8_t emu_mode;       // Emulation mode (EMULATION_MODE_*)
+    char browser_path[280]; // Last file browser directory
+    char browser_file[256]; // Last launched file name (in browser_path)
 } settings_t;
 
 extern settings_t g_settings;

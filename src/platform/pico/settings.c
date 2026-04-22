@@ -783,7 +783,7 @@ void settings_load(void) {
         return;
     }
 
-    char line[128], value[64];
+    char line[384], value[280];
     while (f_gets(line, sizeof(line), &file)) {
         if (parse_ini_line(line, "player1", value, sizeof(value))) {
             int m = parse_input_mode(value);
@@ -824,6 +824,14 @@ void settings_load(void) {
             else
                 g_settings.selector_mode = SELECTOR_MODE_CAROUSEL;
         }
+        else if (parse_ini_line(line, "browser_path", value, sizeof(value))) {
+            strncpy(g_settings.browser_path, value, sizeof(g_settings.browser_path) - 1);
+            g_settings.browser_path[sizeof(g_settings.browser_path) - 1] = '\0';
+        }
+        else if (parse_ini_line(line, "browser_file", value, sizeof(value))) {
+            strncpy(g_settings.browser_file, value, sizeof(g_settings.browser_file) - 1);
+            g_settings.browser_file[sizeof(g_settings.browser_file) - 1] = '\0';
+        }
     }
 
     f_close(&file);
@@ -843,7 +851,7 @@ void settings_save(void) {
         return;
     }
 
-    char buf[256];
+    char buf[600];
     static const char *selector_mode_ini_names[] = {"carousel", "browser"};
     static const char *emu_mode_ini_names[] = {"nes", "dendy"};
     snprintf(buf, sizeof(buf),
@@ -853,13 +861,17 @@ void settings_save(void) {
         "audio = %s\n"
         "volume = %d\n"
         "mode = %s\n"
-        "selector = %s\n",
+        "selector = %s\n"
+        "browser_path = %s\n"
+        "browser_file = %s\n",
         input_mode_ini_names[g_settings.p1_mode],
         input_mode_ini_names[g_settings.p2_mode],
         audio_mode_ini_names[g_settings.audio_mode],
         g_settings.volume,
         emu_mode_ini_names[g_settings.emu_mode < EMULATION_MODE_COUNT ? g_settings.emu_mode : 0],
-        selector_mode_ini_names[g_settings.selector_mode & 1]);
+        selector_mode_ini_names[g_settings.selector_mode & 1],
+        g_settings.browser_path,
+        g_settings.browser_file);
 
     UINT bw;
     f_write(&file, buf, strlen(buf), &bw);
