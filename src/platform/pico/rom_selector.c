@@ -1108,7 +1108,7 @@ void rom_selector_preload_index(void) {
 #define FB_NAME_MAX_CHARS 37
 
 typedef struct {
-    char name[64];
+    char name[256];
     bool is_dir;
     uint32_t size;
 } fb_entry_t;
@@ -1246,10 +1246,16 @@ static void fb_draw_browser(const char *path, int selected, int scroll) {
 
     /* Footer (above overscan margin) */
     fb_hline(0, SCREEN_H - 22, SCREEN_W, PAL_GRAY);
-    fb_text_center(SCREEN_H - 19, "A/ENTER:OPEN  B/ESC:BACK", PAL_GRAY);
+    fb_text_center(SCREEN_H - 19, "A:OPEN B:BACK L/R:PAGE", PAL_GRAY);
 }
 
 static int search_dialog_show(void);
+
+/* Persistent file browser state across calls (Issue 2) */
+static char fb_persist_path[ROM_PATH_MAX];
+static int  fb_persist_selected = 0;
+static int  fb_persist_scroll = 0;
+static bool fb_persist_valid = false;
 
 static bool file_browser_show(long *out_rom_size) {
     fb = test_pixels;
@@ -1263,12 +1269,31 @@ static bool file_browser_show(long *out_rom_size) {
     bool sd_ok = (f_mount(&browser_fs, "", 1) == FR_OK);
     if (!sd_ok) return false;
 
-    char cur_path[256];
-    strcpy(cur_path, "/nes");
+    char cur_path[ROM_PATH_MAX];
+    if (fb_persist_valid) {
+        strncpy(cur_path, fb_persist_path, sizeof(cur_path) - 1);
+        cur_path[sizeof(cur_path) - 1] = '\0';
+    } else {
+        strcpy(cur_path, "/nes");
+    }
     fb_scan_dir(cur_path);
 
-    int selected = 0;
-    int scroll = 0;
+    int selected, scroll;
+    if (fb_persist_valid) {
+        selected = fb_persist_selected;
+        scroll = fb_persist_scroll;
+        /* Clamp to current directory contents */
+        if (selected >= fb_entry_count) selected = fb_entry_count > 0 ? fb_entry_count - 1 : 0;
+        if (scroll > selected) scroll = selected;
+        if (fb_entry_count > FB_VISIBLE_LINES && scroll > fb_entry_count - FB_VISIBLE_LINES)
+            scroll = fb_entry_count - FB_VISIBLE_LINES;
+        if (scroll < 0) scroll = 0;
+    } else {
+        selected = 0;
+        scroll = 0;
+    }
+    fb_persist_valid = true;
+
     int prev_buttons = read_selector_buttons();
     uint32_t hold_counter = 0;
 
@@ -1289,7 +1314,7 @@ static bool file_browser_show(long *out_rom_size) {
         if (buttons != 0 && buttons == prev_buttons) {
             hold_counter++;
             if (hold_counter > 20 && (hold_counter % 3) == 0)
-                pressed = buttons & (BTN_UP | BTN_DOWN | BTN_PGUP | BTN_PGDN);
+                pressed = buttons & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT | BTN_PGUP | BTN_PGDN);
         } else {
             hold_counter = 0;
         }
@@ -1299,12 +1324,21 @@ static bool file_browser_show(long *out_rom_size) {
         if (pressed & (BTN_F11 | BTN_ESC | BTN_B)) {
             g_settings.selector_mode = SELECTOR_MODE_CAROUSEL;
             settings_save();
+            /* Save browser position for next time */
+            strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
+            fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+            fb_persist_selected = selected;
+            fb_persist_scroll = scroll;
             break;
         }
         if (((pressed & BTN_SELECT) && (buttons & BTN_START)) ||
             ((pressed & BTN_START) && (buttons & BTN_SELECT))) {
             g_settings.selector_mode = SELECTOR_MODE_CAROUSEL;
             settings_save();
+            strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
+            fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+            fb_persist_selected = selected;
+            fb_persist_scroll = scroll;
             break;
         }
 
@@ -1316,6 +1350,11 @@ static bool file_browser_show(long *out_rom_size) {
             if (found >= 0 && found < rom_count) {
                 g_settings.selector_mode = SELECTOR_MODE_CAROUSEL;
                 settings_save();
+                /* Save browser position */
+                strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
+                fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+                fb_persist_selected = selected;
+                fb_persist_scroll = scroll;
                 f_unmount("");
                 /* Signal caller to reload carousel at this index */
                 last_selected_rom = found;
@@ -1333,11 +1372,11 @@ static bool file_browser_show(long *out_rom_size) {
         if (pressed & BTN_DOWN) {
             if (selected < fb_entry_count - 1) selected++;
         }
-        if (pressed & BTN_PGUP) {
+        if (pressed & (BTN_PGUP | BTN_LEFT)) {
             selected -= FB_VISIBLE_LINES;
             if (selected < 0) selected = 0;
         }
-        if (pressed & BTN_PGDN) {
+        if (pressed & (BTN_PGDN | BTN_RIGHT)) {
             selected += FB_VISIBLE_LINES;
             if (selected >= fb_entry_count) selected = fb_entry_count - 1;
         }
@@ -1356,24 +1395,31 @@ static bool file_browser_show(long *out_rom_size) {
             fb_entry_t *e = &fb_entries[selected];
 
             if (e->is_dir) {
+                char new_path[ROM_PATH_MAX];
                 if (strcmp(e->name, "..") == 0) {
-                    char *last_slash = strrchr(cur_path, '/');
-                    if (last_slash && last_slash != cur_path)
+                    strncpy(new_path, cur_path, sizeof(new_path) - 1);
+                    new_path[sizeof(new_path) - 1] = '\0';
+                    char *last_slash = strrchr(new_path, '/');
+                    if (last_slash && last_slash != new_path)
                         *last_slash = '\0';
                     else
-                        strcpy(cur_path, "/");
+                        strcpy(new_path, "/");
                 } else {
                     size_t plen = strlen(cur_path);
                     if (plen == 1 && cur_path[0] == '/')
-                        snprintf(cur_path + plen, sizeof(cur_path) - plen,
-                                 "%s", e->name);
-                    else
-                        snprintf(cur_path + plen, sizeof(cur_path) - plen,
+                        snprintf(new_path, sizeof(new_path),
                                  "/%s", e->name);
+                    else
+                        snprintf(new_path, sizeof(new_path),
+                                 "%s/%s", cur_path, e->name);
                 }
-                fb_scan_dir(cur_path);
-                selected = 0;
-                scroll = 0;
+                /* Only navigate if the new path fits */
+                if (strlen(new_path) < sizeof(cur_path)) {
+                    strcpy(cur_path, new_path);
+                    fb_scan_dir(cur_path);
+                    selected = 0;
+                    scroll = 0;
+                }
             } else if (is_nes_file(e->name)) {
                 /* Load the ROM */
                 char rpath[ROM_PATH_MAX];
@@ -1394,12 +1440,23 @@ static bool file_browser_show(long *out_rom_size) {
                 if (loaded_size > 0) {
                     set_rom_name(e->name);
                     *out_rom_size = loaded_size;
+                    /* Save browser position for when we return */
+                    strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
+                    fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+                    fb_persist_selected = selected;
+                    fb_persist_scroll = scroll;
                     f_unmount("");
                     return true;
                 }
             }
         }
     }
+
+    /* Save browser position */
+    strncpy(fb_persist_path, cur_path, sizeof(fb_persist_path) - 1);
+    fb_persist_path[sizeof(fb_persist_path) - 1] = '\0';
+    fb_persist_selected = selected;
+    fb_persist_scroll = scroll;
 
     f_unmount("");
     return false;
