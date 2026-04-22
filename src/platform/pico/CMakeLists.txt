@@ -124,10 +124,10 @@ endif()
 
 if(HDMI_PIO)
     add_subdirectory(${DRIVERSDIR}/hdmi_pio hdmi_pio)
-    target_compile_definitions(hdmi_pio PUBLIC
-        HDMI_BASE_PIN=${HDMI_PIN}
-        VGA_BASE_PIN=${VGA_PIN}
-    )
+#    target_compile_definitions(hdmi_pio PUBLIC
+#        HDMI_BASE_PIN=${HDMI_PIN}
+#        VGA_BASE_PIN=${VGA_PIN}
+#    )
 elseif(VIDEO_COMPOSITE)
     add_subdirectory(${DRIVERSDIR}/tv tv_driver)
     if(DEFINED TV_PIN)

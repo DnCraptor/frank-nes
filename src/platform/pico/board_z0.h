@@ -9,6 +9,8 @@
 #ifndef BOARD_Z0_H
 #define BOARD_Z0_H
 
+//#include "boards/waveshare_rp2350_pizero.h"
+
 /* PS/2 Keyboard */
 #define KBD_CLOCK_PIN 14
 #define KBD_DATA_PIN  15
@@ -48,5 +50,6 @@
 /* Video: PIO-HDMI only (GPIO 32-39) */
 #define HDMI_BASE_PIN 32
 #define VGA_BASE_PIN  32
+#define NO_VGA  1
 
 #endif /* BOARD_Z0_H */

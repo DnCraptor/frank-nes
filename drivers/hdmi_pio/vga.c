@@ -8,8 +8,6 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include "../../src/platform/pico/board_config.h"
-
 #include "hdmi.h"
 #include "hardware/clocks.h"
 #include "stdbool.h"

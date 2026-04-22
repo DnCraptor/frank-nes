@@ -15,7 +15,7 @@ endif()
 
 cmake_minimum_required(VERSION 3.13)
 
-set(PLATFORM pc)
+set(PLATFORM z0)
 set(HDMI_PIO ON)
 
 # --- Pico RP2350 build (when PICO_BOARD is set via preset or command line) ---

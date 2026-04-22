@@ -841,8 +841,12 @@ static void real_main(void)
     {
         extern bool SELECT_VGA;
 #ifdef HAS_TV
+    #if NO_VGA
+        SELECT_VGA = false;
+    #else
         uint8_t link = testPins(HDMI_BASE_PIN, HDMI_BASE_PIN + 1);
         SELECT_VGA = (link == 0) || (link == 0x1F);
+    #endif
 #else
         SELECT_VGA = false;
 #endif

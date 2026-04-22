@@ -12,6 +12,8 @@
 #ifndef HDMI_PIO_H_
 #define HDMI_PIO_H_
 
+#include "../../src/platform/pico/board_config.h"
+
 #include "inttypes.h"
 #include "stdbool.h"
 #include "hardware/dma.h"
