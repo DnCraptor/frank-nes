@@ -33,7 +33,7 @@ extern uint8_t test_pixels[];
 extern void audio_fill_silence(int count);
 extern void video_post_frame(const uint8_t *pixels, long pitch);
 extern void video_wait_vsync(void);
-#ifdef VIDEO_COMPOSITE
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
 extern void video_sync_palette_from_rgb565(int buf_idx);
 #endif
 
@@ -105,7 +105,7 @@ static void setup_selector_palette(void) {
 
     pending_pal_idx = pal_write_idx;
     pal_write_idx ^= 1;
-#ifdef VIDEO_COMPOSITE
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
     video_sync_palette_from_rgb565(pal_write_idx ^ 1);
 #endif
 }
@@ -2004,7 +2004,7 @@ static void setup_welcome_palette(void) {
     c = rgb565(0xE5, 0x00, 0x11); pal[PAL_LOGO_RED]     = c | ((uint32_t)c << 16);
     c = rgb565(0x90, 0x90, 0x90); pal[PAL_LOGO_CIRCLE]  = c | ((uint32_t)c << 16);
     c = rgb565(0x60, 0x60, 0x60); pal[PAL_LOGO_SHADOW]  = c | ((uint32_t)c << 16);
-#ifdef VIDEO_COMPOSITE
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
     video_sync_palette_from_rgb565(buf);
 #endif
 }

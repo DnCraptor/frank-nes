@@ -28,6 +28,12 @@ if [ "${VIDEO_COMPOSITE:-0}" = "1" ]; then
     CMAKE_OPTS="$CMAKE_OPTS -DVIDEO_COMPOSITE=ON"
 fi
 
+# Optional: PIO-based HDMI output (murmulator 2 hardware)
+# Usage: HDMI_PIO=1 ./build.sh
+if [ "${HDMI_PIO:-0}" = "1" ]; then
+    CMAKE_OPTS="$CMAKE_OPTS -DHDMI_PIO=ON"
+fi
+
 # USB HID host mode (disabled by default for USB serial logging)
 # Usage: USB_HID=1 ./build.sh  to enable (release builds use release.sh)
 if [ "${USB_HID:-0}" = "1" ]; then
@@ -38,10 +44,13 @@ fi
 
 # Clean build dir if video output mode changed (CMake caches the option)
 if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
-    CACHED=$(grep -s 'VIDEO_COMPOSITE:BOOL=' "$BUILD_DIR/CMakeCache.txt" | cut -d= -f2)
-    WANTED="OFF"
-    [ "${VIDEO_COMPOSITE:-0}" = "1" ] && WANTED="ON"
-    if [ "$CACHED" != "$WANTED" ]; then
+    CACHED_COMP=$(grep -s 'VIDEO_COMPOSITE:BOOL=' "$BUILD_DIR/CMakeCache.txt" | cut -d= -f2)
+    CACHED_PIO=$(grep -s 'HDMI_PIO:BOOL=' "$BUILD_DIR/CMakeCache.txt" | cut -d= -f2)
+    WANTED_COMP="OFF"
+    WANTED_PIO="OFF"
+    [ "${VIDEO_COMPOSITE:-0}" = "1" ] && WANTED_COMP="ON"
+    [ "${HDMI_PIO:-0}" = "1" ] && WANTED_PIO="ON"
+    if [ "$CACHED_COMP" != "$WANTED_COMP" ] || [ "$CACHED_PIO" != "$WANTED_PIO" ]; then
         rm -rf "$BUILD_DIR"
     fi
 fi

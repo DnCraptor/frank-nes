@@ -63,7 +63,7 @@ static void i2s_dma_irq_handler(void) {
 void i2s_audio_init(uint data_pin, uint clock_pin_base, uint32_t sample_rate) {
     printf("I2S: init data=%u clk=%u rate=%lu\n", data_pin, clock_pin_base, (unsigned long)sample_rate);
 
-#ifdef VIDEO_COMPOSITE
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
     /* Composite TV uses PIO0; I2S must use PIO1 */
     i2s_pio = pio1;
 #else
@@ -73,7 +73,7 @@ void i2s_audio_init(uint data_pin, uint clock_pin_base, uint32_t sample_rate) {
     if (dma_xfer_count > DMA_BUFFER_SAMPLES) dma_xfer_count = DMA_BUFFER_SAMPLES;
 
     /* Configure GPIO for PIO */
-#ifdef VIDEO_COMPOSITE
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
     gpio_set_function(data_pin, GPIO_FUNC_PIO1);
     gpio_set_function(clock_pin_base, GPIO_FUNC_PIO1);
     gpio_set_function(clock_pin_base + 1, GPIO_FUNC_PIO1);

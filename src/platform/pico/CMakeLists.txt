@@ -35,15 +35,18 @@ set(COREDIR ${SRCDIR}/core_quicknes)
 set(EMU2413DIR ${SRCDIR}/emu2413)
 set(PICODIR ${SRCDIR}/platform/pico)
 
-# Video output selection: HDMI (default) or Composite TV
+# Video output selection: HSTX HDMI (default), Composite TV, or PIO HDMI
 option(VIDEO_COMPOSITE "Build with composite TV output instead of HDMI" OFF)
+option(HDMI_PIO "Build with PIO-based HDMI output (murmulator 2)" OFF)
 
-if(NOT VIDEO_COMPOSITE)
+if(HDMI_PIO)
+    add_subdirectory(${DRIVERSDIR}/hdmi_pio hdmi_pio)
+elseif(VIDEO_COMPOSITE)
+    add_subdirectory(${DRIVERSDIR}/tv tv_driver)
+else()
     # HSTX clocked from PLL_USB at 126MHz (reconfigured in main)
     add_compile_definitions(MODE_HSTX_CLK_DIV=1)
     add_subdirectory(${DRIVERSDIR}/pico_hdmi pico_hdmi)
-else()
-    add_subdirectory(${DRIVERSDIR}/tv tv_driver)
 endif()
 
 # Peripheral drivers (always compiled)
@@ -134,7 +137,9 @@ target_compile_definitions(frank-nes PRIVATE
     SDCARD_PIN_SPI0_MISO=4
     SDCARD_PIN_SPI0_CS=5
 )
-if(VIDEO_COMPOSITE)
+if(HDMI_PIO)
+    target_compile_definitions(frank-nes PRIVATE HDMI_PIO)
+elseif(VIDEO_COMPOSITE)
     target_compile_definitions(frank-nes PRIVATE VIDEO_COMPOSITE)
 endif()
 
@@ -164,7 +169,9 @@ target_link_libraries(frank-nes
     nespad
     ps2kbd
 )
-if(VIDEO_COMPOSITE)
+if(HDMI_PIO)
+    target_link_libraries(frank-nes hdmi_pio)
+elseif(VIDEO_COMPOSITE)
     target_link_libraries(frank-nes tv_driver)
 else()
     target_link_libraries(frank-nes pico_hdmi)

@@ -5,12 +5,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef VIDEO_COMPOSITE
+#if defined(HDMI_PIO)
+#include "hdmi.h"
+#elif defined(VIDEO_COMPOSITE)
+#include "graphics.h"
+#else
 #include "pico_hdmi/hstx_data_island_queue.h"
 #include "pico_hdmi/hstx_packet.h"
 #include "pico_hdmi/video_output.h"
-#else
-#include "graphics.h"
 #endif
 
 #include "pico/multicore.h"
@@ -52,7 +54,7 @@
 static uint8_t big_stack[16384] __attribute__((aligned(8)));
 static void real_main(void);
 
-#ifndef VIDEO_COMPOSITE
+#if !defined(VIDEO_COMPOSITE) && !defined(HDMI_PIO)
 #define FRAME_WIDTH 640
 #define FRAME_HEIGHT 480
 #endif
@@ -64,6 +66,11 @@ static void real_main(void);
 #ifdef VIDEO_COMPOSITE
 /* Framebuffer for composite TV: 8-bit indexed, 256x240 */
 static uint8_t tv_framebuf[NES_WIDTH * NES_HEIGHT];
+#endif
+
+#ifdef HDMI_PIO
+/* Framebuffer for PIO HDMI: 8-bit indexed, 256x240 */
+static uint8_t soft_framebuf[NES_WIDTH * NES_HEIGHT];
 #endif
 
 
@@ -94,7 +101,7 @@ volatile long pending_pitch;
 /* Vsync flag — set by Core 1 DMA ISR, cleared by Core 0 after emulating */
 volatile uint32_t vsync_flag;
 
-#ifndef VIDEO_COMPOSITE
+#if !defined(VIDEO_COMPOSITE) && !defined(HDMI_PIO)
 static void __not_in_flash("vsync") vsync_cb(void)
 {
     /* Apply pending frame pointer during vblank — safe from tearing */
@@ -111,7 +118,9 @@ static void __not_in_flash("vsync") vsync_cb(void)
     vsync_flag = 1;
     __sev(); /* wake Core 0 from WFE */
 }
-#else
+#endif
+
+#ifdef VIDEO_COMPOSITE
 /* Copy QuickNES frame (pitch=272) into contiguous TV framebuffer (width=256) */
 static void tv_copy_frame(const uint8_t *src, long pitch) {
     if (pitch == NES_WIDTH)
@@ -132,6 +141,17 @@ static void render_core_tv(void) {
 }
 #endif
 
+#ifdef HDMI_PIO
+/* Copy QuickNES frame (pitch=272) into contiguous PIO HDMI framebuffer (width=256) */
+static void soft_copy_frame(const uint8_t *src, long pitch) {
+    if (pitch == NES_WIDTH)
+        memcpy(soft_framebuf, src, NES_WIDTH * NES_HEIGHT);
+    else
+        for (int y = 0; y < NES_HEIGHT; y++)
+            memcpy(&soft_framebuf[y * NES_WIDTH], src + y * pitch, NES_WIDTH);
+}
+#endif
+
 /*
  * Audio pipeline — same architecture as pico-infonesPlus:
  *   Core 0: encode NES audio → push pre-encoded packets to DI queue
@@ -144,7 +164,7 @@ static void render_core_tv(void) {
  */
 static int audio_frame_counter = 0;
 
-#ifndef VIDEO_COMPOSITE
+#if !defined(VIDEO_COMPOSITE) && !defined(HDMI_PIO)
 /* ─── HDMI audio: encode mono NES samples into Data Island packets ─── */
 static int16_t audio_carry[3];
 static int audio_carry_count = 0;
@@ -218,7 +238,7 @@ static void hdmi_fill_silence(int count)
         hstx_di_queue_push(&island);
     }
 }
-#endif /* !VIDEO_COMPOSITE */
+#endif /* !VIDEO_COMPOSITE && !HDMI_PIO */
 
 /* ─── Audio routing: HDMI or I2S based on settings ────────────────── */
 static bool i2s_initialized = false;
@@ -245,14 +265,14 @@ static const int16_t *apply_volume(const int16_t *buf, int count) {
 static void __not_in_flash("audio") audio_push_samples(const int16_t *buf, int count)
 {
     if (g_settings.audio_mode == AUDIO_MODE_DISABLED) {
-#ifndef VIDEO_COMPOSITE
+#if !defined(VIDEO_COMPOSITE) && !defined(HDMI_PIO)
         hdmi_fill_silence(count);
 #endif
         return;
     }
     const int16_t *out = (g_settings.volume < 100) ? apply_volume(buf, count) : buf;
-#ifdef VIDEO_COMPOSITE
-    /* Composite mode: I2S only */
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
+    /* Composite / PIO HDMI mode: I2S only */
     ensure_i2s_initialized();
     i2s_audio_push_samples(out, count);
 #else
@@ -268,7 +288,7 @@ static void __not_in_flash("audio") audio_push_samples(const int16_t *buf, int c
 
 void audio_fill_silence(int count)
 {
-#ifdef VIDEO_COMPOSITE
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
     ensure_i2s_initialized();
     i2s_audio_fill_silence(count);
 #else
@@ -288,6 +308,8 @@ void video_post_frame(const uint8_t *pixels, long pitch) {
     else
         for (int y = 0; y < NES_HEIGHT; y++)
             memcpy(&tv_framebuf[y * NES_WIDTH], pixels + y * pitch, NES_WIDTH);
+#elif defined(HDMI_PIO)
+    soft_copy_frame(pixels, pitch);
 #else
     pending_pitch = pitch;
     pending_pixels = pixels;
@@ -295,7 +317,7 @@ void video_post_frame(const uint8_t *pixels, long pitch) {
 }
 
 void video_wait_vsync(void) {
-#ifdef VIDEO_COMPOSITE
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
     sleep_ms(1);
 #else
     while (pending_pixels != NULL) {
@@ -334,6 +356,38 @@ void video_sync_palette_from_rgb565(int buf_idx) {
         graphics_set_palette(i, ((uint32_t)r << 16) | ((uint32_t)g << 8) | b);
     }
     graphics_set_palette(200, 0x000000);
+}
+
+static void update_palette(int buf_idx) {
+    (void)buf_idx;
+    video_sync_palette();
+}
+#elif defined(HDMI_PIO)
+/* Sync NES palette to PIO HDMI driver */
+void video_sync_palette(void) {
+    int pal_size = 0;
+    const int16_t *pal = qnes_get_palette(&pal_size);
+    const qnes_rgb_t *colors = qnes_get_color_table();
+    if (!pal || !colors) return;
+    for (int i = 0; i < pal_size && i < 251; i++) {
+        int idx = pal[i];
+        if (idx < 0 || idx >= 512) idx = 0x0F;
+        const qnes_rgb_t *c = &colors[idx];
+        graphics_set_palette_hdmi(i, ((uint32_t)c->r << 16) | ((uint32_t)c->g << 8) | c->b);
+    }
+    graphics_restore_sync_colors();
+}
+
+/* Sync rgb565_palette_32 entries to PIO HDMI driver (for menu screens) */
+void video_sync_palette_from_rgb565(int buf_idx) {
+    for (int i = 0; i < 251; i++) {
+        uint16_t c16 = (uint16_t)(rgb565_palette_32[buf_idx][i] & 0xFFFF);
+        uint8_t r = ((c16 >> 11) & 0x1F) << 3;
+        uint8_t g = ((c16 >> 5) & 0x3F) << 2;
+        uint8_t b = (c16 & 0x1F) << 3;
+        graphics_set_palette_hdmi(i, ((uint32_t)r << 16) | ((uint32_t)g << 8) | b);
+    }
+    graphics_restore_sync_colors();
 }
 
 static void update_palette(int buf_idx) {
@@ -663,8 +717,8 @@ static int ps2kbd_to_qnes(uint16_t kbd)
 
 static void real_main(void)
 {
-#ifdef VIDEO_COMPOSITE
-    /* Overclock to 378 MHz for composite TV mode */
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
+    /* Overclock to 378 MHz for composite TV / PIO HDMI mode */
     vreg_disable_voltage_limit();
     vreg_set_voltage(VREG_VOLTAGE_1_60);
     sleep_ms(10);
@@ -728,8 +782,21 @@ static void real_main(void)
     multicore_launch_core1(render_core_tv);
     sleep_ms(200);
     audio_fill_silence(SAMPLE_RATE / 60 * 6);
+#elif defined(HDMI_PIO)
+    /* Start PIO HDMI output — runs on Core 0 via DMA ISR, no Core 1 needed */
+    memset(soft_framebuf, 0, sizeof(soft_framebuf));
+    graphics_buffer_width = NES_WIDTH;
+    graphics_buffer_height = NES_HEIGHT;
+    graphics_set_buffer(soft_framebuf);
+    graphics_init_hdmi();
+    /* Set initial palette to black */
+    for (int i = 0; i < 251; i++) graphics_set_palette_hdmi(i, 0);
+    graphics_set_palette_hdmi(255, 0);
+    graphics_restore_sync_colors();
+    sleep_ms(200);
+    audio_fill_silence(SAMPLE_RATE / 60 * 6);
 #else
-    /* Start HDMI */
+    /* Start HSTX HDMI */
     frame_pixels = test_pixels;
     frame_pitch = NES_WIDTH;
 
@@ -838,7 +905,7 @@ static void real_main(void)
     if (rom_loaded) {
         bool reset_requested = false;
         while (1) {
-#ifndef VIDEO_COMPOSITE
+#if !defined(VIDEO_COMPOSITE) && !defined(HDMI_PIO)
             /* Wait for vsync — Core 1 applies pending frame during vblank. */
             while (pending_pixels != NULL) {
 #if USB_HID_ENABLED
@@ -945,6 +1012,8 @@ static void real_main(void)
 
 #ifdef VIDEO_COMPOSITE
             tv_copy_frame(qnes_get_pixels(), 272);
+#elif defined(HDMI_PIO)
+            soft_copy_frame(qnes_get_pixels(), 272);
 #else
             pending_pitch = 272;
             pending_pixels = qnes_get_pixels();

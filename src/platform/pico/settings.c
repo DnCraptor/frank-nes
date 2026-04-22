@@ -30,7 +30,7 @@ extern volatile int pending_pal_idx;
 extern void audio_fill_silence(int count);
 extern void video_post_frame(const uint8_t *pixels, long pitch);
 extern void video_wait_vsync(void);
-#ifdef VIDEO_COMPOSITE
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
 extern void video_sync_palette_from_rgb565(int buf_idx);
 #endif
 
@@ -449,7 +449,7 @@ static void setup_menu_palette(void) {
 
     pending_pal_idx = pal_write_idx;
     pal_write_idx ^= 1;
-#ifdef VIDEO_COMPOSITE
+#if defined(VIDEO_COMPOSITE) || defined(HDMI_PIO)
     video_sync_palette_from_rgb565(pal_write_idx ^ 1);
 #endif
 }
